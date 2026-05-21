@@ -95,7 +95,7 @@ interface LabAgentRuntime {
 }
 
 const MAX_ROOM_TURNS = 10;
-const MIN_DYNAMIC_TURNS_AFTER_OPENING = 1;
+const MIN_DYNAMIC_TURNS_AFTER_OPENING = 0;
 const MIN_URGENCY_TO_SPEAK = 18;
 const MAX_CONTEXT_OVERFLOW_RETRIES = 1;
 const MAX_OPEN_QUESTION_RESPONSE_TURNS = 2;
@@ -517,29 +517,10 @@ export class ThinktankRoomRuntime {
 		return this.agents.find((agent) => agent.visibleName === lastSpeaker)?.definition.id;
 	}
 
-	private fallbackNextSpeaker(): LabAgentRuntime {
-		const lastSpeakerId = this.getLastSpeakerId();
-		const speakerCounts = new Map<LabId, number>();
-		for (const agent of this.agents) {
-			speakerCounts.set(agent.definition.id, 0);
-		}
-		for (const turn of this.transcript) {
-			const agent = this.agents.find((candidate) => candidate.visibleName === turn.speaker);
-			if (agent) {
-				speakerCounts.set(agent.definition.id, (speakerCounts.get(agent.definition.id) ?? 0) + 1);
-			}
-		}
-		const candidates =
-			this.agents.length > 1 ? this.agents.filter((agent) => agent.definition.id !== lastSpeakerId) : this.agents;
-		return candidates.sort(
-			(a, b) => (speakerCounts.get(a.definition.id) ?? 0) - (speakerCounts.get(b.definition.id) ?? 0),
-		)[0]!;
-	}
-
 	private async chooseOpeningTurn(
 		turnIndex: number,
 		spokenAgentIds: Set<LabId>,
-	): Promise<{ agent: LabAgentRuntime; kind: TurnImpulseKind }> {
+	): Promise<{ action: "speak"; agent: LabAgentRuntime; kind: TurnImpulseKind } | { action: "idle" }> {
 		const lastSpeakerId = this.getLastSpeakerId();
 		const candidates = this.agents.filter(
 			(agent) => !spokenAgentIds.has(agent.definition.id) && agent.definition.id !== lastSpeakerId,
@@ -547,7 +528,7 @@ export class ThinktankRoomRuntime {
 		const eligibleAgents =
 			candidates.length > 0 ? candidates : this.agents.filter((agent) => !spokenAgentIds.has(agent.definition.id));
 		if (eligibleAgents.length === 0) {
-			return { agent: this.fallbackNextSpeaker(), kind: "synthesize" };
+			return { action: "idle" };
 		}
 
 		const impulseResults = await Promise.all(
@@ -570,7 +551,7 @@ Public transcript:
 ${transcriptText(this.transcript)}
 
 You have not yet given your first visible contribution. Decide whether you should take the floor now.
-The room is still opening, so do not finish the discussion. If you speak, contribute something useful rather than repeating prior turns.`,
+The room is still opening, so do not finish the discussion. If you speak, contribute something useful rather than repeating prior turns. If you have nothing useful to add, pass; the room may go quiet.`,
 					);
 					const impulse = parseTurnImpulse(raw) ?? { action: "pass" as const, kind: "none" as const, urgency: 0 };
 					return {
@@ -595,15 +576,24 @@ The room is still opening, so do not finish the discussion. If you speak, contri
 			.filter((entry) => entry.impulse.action === "speak")
 			.sort((a, b) => b.impulse.urgency - a.impulse.urgency)[0];
 		if (!strongest || strongest.impulse.urgency < MIN_URGENCY_TO_SPEAK) {
-			return { agent: eligibleAgents[0]!, kind: turnIndex === 0 ? "add" : "synthesize" };
+			if (turnIndex === 0) {
+				return { action: "speak", agent: eligibleAgents[0]!, kind: "add" };
+			}
+			return { action: "idle" };
 		}
-		return { agent: strongest.agent, kind: strongest.impulse.kind === "none" ? "add" : strongest.impulse.kind };
+		return {
+			action: "speak",
+			agent: strongest.agent,
+			kind: strongest.impulse.kind === "none" ? "add" : strongest.impulse.kind,
+		};
 	}
 
 	private async chooseNextTurn(
 		turnIndex: number,
 	): Promise<
-		{ action: "speak"; agent: LabAgentRuntime; kind: TurnImpulseKind } | { action: "finish"; agent: LabAgentRuntime }
+		| { action: "speak"; agent: LabAgentRuntime; kind: TurnImpulseKind }
+		| { action: "finish"; agent: LabAgentRuntime }
+		| { action: "idle" }
 	> {
 		const lastSpeakerId = this.getLastSpeakerId();
 		const eligibleAgents =
@@ -634,7 +624,7 @@ Public action summaries:
 
 ${actionSummaryText(this.publicActions)}
 
-Decide whether you want to take the next visible turn. Pass unless you have something worth adding now. Complete silence is not allowed in the room, but weak thoughts should still pass.`,
+Decide whether you want to take the next visible turn. Pass unless you have something worth adding now. If nothing is worth saying, pass; the room may go quiet.`,
 					);
 					return {
 						agent,
@@ -659,7 +649,7 @@ Decide whether you want to take the next visible turn. Pass unless you have some
 			.sort((a, b) => b.impulse.urgency - a.impulse.urgency)[0];
 
 		if (!strongest || strongest.impulse.urgency < MIN_URGENCY_TO_SPEAK) {
-			return { action: "speak", agent: this.fallbackNextSpeaker(), kind: "synthesize" };
+			return { action: "idle" };
 		}
 		if (strongest.impulse.action === "finish") {
 			return { action: "finish", agent: strongest.agent };
@@ -1022,6 +1012,9 @@ Decide if you need to interrupt them immediately.`;
 			for (let openingTurnIndex = 0; openingTurnIndex < this.agents.length; openingTurnIndex++) {
 				this.callbacks.onStatus?.("Opening the room.");
 				const next = await this.chooseOpeningTurn(openingTurnIndex, spokenAgentIds);
+				if (next.action === "idle") {
+					break;
+				}
 				const agent = next.agent;
 				spokenAgentIds.add(agent.definition.id);
 
@@ -1057,6 +1050,9 @@ Decide if you need to interrupt them immediately.`;
 						: "Listening for who wants the floor.",
 				);
 				const next = await this.chooseNextTurn(this.transcript.length);
+				if (next.action === "idle") {
+					break;
+				}
 				const agent = next.agent;
 				const canClose = !isRespondingToOpenQuestion && dynamicTurnIndex >= MIN_DYNAMIC_TURNS_AFTER_OPENING;
 				const requestedKind = next.action === "finish" ? "final" : next.kind;
