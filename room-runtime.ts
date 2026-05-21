@@ -575,17 +575,17 @@ The room is still opening, so do not finish the discussion. If you speak, contri
 		const strongest = impulseResults
 			.filter((entry) => entry.impulse.action === "speak")
 			.sort((a, b) => b.impulse.urgency - a.impulse.urgency)[0];
-		if (!strongest || strongest.impulse.urgency < MIN_URGENCY_TO_SPEAK) {
-			if (turnIndex === 0) {
-				return { action: "speak", agent: eligibleAgents[0]!, kind: "add" };
-			}
-			return { action: "idle" };
+		if (strongest) {
+			return {
+				action: "speak",
+				agent: strongest.agent,
+				kind: strongest.impulse.kind === "none" ? "add" : strongest.impulse.kind,
+			};
 		}
-		return {
-			action: "speak",
-			agent: strongest.agent,
-			kind: strongest.impulse.kind === "none" ? "add" : strongest.impulse.kind,
-		};
+		if (turnIndex === 0) {
+			return { action: "speak", agent: eligibleAgents[0]!, kind: "add" };
+		}
+		return { action: "idle" };
 	}
 
 	private async chooseNextTurn(
