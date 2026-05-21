@@ -96,7 +96,6 @@ interface LabAgentRuntime {
 
 const MAX_ROOM_TURNS = 10;
 const MIN_DYNAMIC_TURNS_AFTER_OPENING = 0;
-const MIN_URGENCY_TO_SPEAK = 18;
 const MAX_CONTEXT_OVERFLOW_RETRIES = 1;
 const MAX_OPEN_QUESTION_RESPONSE_TURNS = 2;
 const READ_WRITE_TOOL_WARNING = `Tool use is public in this room. Reads, searches, and bash exploration may proceed.
@@ -595,7 +594,7 @@ Public action summaries:
 
 ${actionSummaryText(this.publicActions)}
 
-Decide whether you want to take the next visible turn. Pass unless you have something worth adding now. If nothing is worth saying, pass; the room may go quiet.`,
+Decide whether the room should continue. Take the floor when the latest turn challenges, corrects, extends, or questions your position, or when a useful synthesis would move the conversation forward. Pass if you would mostly restate prior turns, if the latest turn is only asking the human for missing context, or if the exchange is complete.`,
 					);
 					return {
 						agent,
@@ -619,7 +618,7 @@ Decide whether you want to take the next visible turn. Pass unless you have some
 			.filter((entry) => entry.impulse.action === "speak" || entry.impulse.action === "finish")
 			.sort((a, b) => b.impulse.urgency - a.impulse.urgency)[0];
 
-		if (!strongest || strongest.impulse.urgency < MIN_URGENCY_TO_SPEAK) {
+		if (!strongest) {
 			return { action: "idle" };
 		}
 		if (strongest.impulse.action === "finish") {
