@@ -378,6 +378,7 @@ export class ThinktankRoomRuntime {
 								provider: entry.model.provider,
 								model: entry.model.id,
 								thinkingLevel: entry.thinkingLevel,
+								disabled: entry.disabled,
 							}
 						: undefined,
 				]),
