@@ -517,78 +517,46 @@ export class ThinktankRoomRuntime {
 		return this.agents.find((agent) => agent.visibleName === lastSpeaker)?.definition.id;
 	}
 
-	private async chooseOpeningTurn(
+	private chooseOpeningTurn(
 		turnIndex: number,
 		spokenAgentIds: Set<LabId>,
-	): Promise<{ action: "speak"; agent: LabAgentRuntime; kind: TurnImpulseKind } | { action: "idle" }> {
-		const lastSpeakerId = this.getLastSpeakerId();
-		const candidates = this.agents.filter(
-			(agent) => !spokenAgentIds.has(agent.definition.id) && agent.definition.id !== lastSpeakerId,
-		);
-		const eligibleAgents =
-			candidates.length > 0 ? candidates : this.agents.filter((agent) => !spokenAgentIds.has(agent.definition.id));
-		if (eligibleAgents.length === 0) {
+	): { action: "speak"; agent: LabAgentRuntime; kind: TurnImpulseKind } | { action: "idle" } {
+		const unspokenAgents = this.agents.filter((agent) => !spokenAgentIds.has(agent.definition.id));
+		if (unspokenAgents.length === 0) {
 			return { action: "idle" };
 		}
 
-		const impulseResults = await Promise.all(
-			eligibleAgents.map(async (agent): Promise<RankedTurnImpulse> => {
-				try {
-					const raw = await this.completeHidden(
-						agent,
-						`Human prompt:
+		const promptWords = new Set(this.currentHumanPrompt.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+		const targetedAgents = unspokenAgents.filter((agent) => {
+			const aliases = [
+				agent.definition.id,
+				agent.definition.shortName,
+				agent.definition.displayName,
+				agent.visibleName,
+				agent.model.id,
+				agent.model.name ?? "",
+				...agent.definition.modelIdNeedles,
+			];
+			if (agent.definition.id === "openai") {
+				aliases.push("openai", "gpt");
+			}
+			if (agent.definition.id === "anthropic") {
+				aliases.push("anthropic", "claude", "opus");
+			}
+			if (agent.definition.id === "google") {
+				aliases.push("google", "gemini");
+			}
 
-${this.currentHumanPrompt}
+			return aliases.some((alias) => {
+				const aliasWords = alias.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+				return aliasWords.length > 0 && aliasWords.every((word) => promptWords.has(word));
+			});
+		});
 
-Your identity:
-${agent.definition.shortName}: ${agent.visibleName} (${getThinktankModelReference(agent.model)})
-
-Opening turn number:
-${turnIndex + 1}
-
-Public transcript:
-
-${transcriptText(this.transcript)}
-
-You have not yet given your first visible contribution. Decide whether you should take the floor now.
-The room is still opening, and Lab Agents are expected to provide distinct first-pass perspectives.
-If another Lab Agent has already spoken, take the floor unless your contribution would be pure redundancy or the prior turn was only asking the human for missing context with no substantive answer yet.
-When you do speak, add a counterpoint, missing caveat, sharper framing, domain-specific angle, or synthesis; do not restate prior turns.
-Do not finish the discussion; the room is still opening.`,
-					);
-					const impulse = parseTurnImpulse(raw) ?? { action: "pass" as const, kind: "none" as const, urgency: 0 };
-					return {
-						agent,
-						impulse: impulse.action === "finish" ? { ...impulse, action: "speak", kind: "synthesize" } : impulse,
-					};
-				} catch (error) {
-					return {
-						agent,
-						impulse: {
-							action: "pass",
-							kind: "none",
-							urgency: 0,
-							reason: error instanceof Error ? error.message : String(error),
-						},
-					};
-				}
-			}),
-		);
-
-		const strongest = impulseResults
-			.filter((entry) => entry.impulse.action === "speak")
-			.sort((a, b) => b.impulse.urgency - a.impulse.urgency)[0];
-		if (strongest) {
-			return {
-				action: "speak",
-				agent: strongest.agent,
-				kind: strongest.impulse.kind === "none" ? "add" : strongest.impulse.kind,
-			};
-		}
-		if (turnIndex === 0) {
-			return { action: "speak", agent: eligibleAgents[0]!, kind: "add" };
-		}
-		return { action: "idle" };
+		const lastSpeakerId = this.getLastSpeakerId();
+		const candidates = targetedAgents.length > 0 ? targetedAgents : unspokenAgents;
+		const agent = candidates.find((candidate) => candidate.definition.id !== lastSpeakerId) ?? candidates[0]!;
+		return { action: "speak", agent, kind: turnIndex === 0 ? "add" : "synthesize" };
 	}
 
 	private async chooseNextTurn(
