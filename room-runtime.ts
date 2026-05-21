@@ -551,7 +551,10 @@ Public transcript:
 ${transcriptText(this.transcript)}
 
 You have not yet given your first visible contribution. Decide whether you should take the floor now.
-The room is still opening, so do not finish the discussion. If you speak, contribute something useful rather than repeating prior turns. If you have nothing useful to add, pass; the room may go quiet.`,
+The room is still opening, and Lab Agents are expected to provide distinct first-pass perspectives.
+If another Lab Agent has already spoken, take the floor unless your contribution would be pure redundancy or the prior turn was only asking the human for missing context with no substantive answer yet.
+When you do speak, add a counterpoint, missing caveat, sharper framing, domain-specific angle, or synthesis; do not restate prior turns.
+Do not finish the discussion; the room is still opening.`,
 					);
 					const impulse = parseTurnImpulse(raw) ?? { action: "pass" as const, kind: "none" as const, urgency: 0 };
 					return {
