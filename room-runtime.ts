@@ -16,15 +16,6 @@ import {
 	type ThinktankRosterModels,
 } from "./roster.ts";
 
-type TurnImpulseKind = "add" | "challenge" | "clarify" | "synthesize" | "final" | "none";
-
-interface TurnImpulse {
-	action: "speak" | "finish" | "pass";
-	kind: TurnImpulseKind;
-	urgency: number;
-	reason?: string;
-}
-
 interface RankedTurnImpulse {
 	agent: LabAgentRuntime;
 	impulse: TurnImpulse;
@@ -180,7 +171,23 @@ function getLastAssistantText(session: AgentSession): string {
 	return "";
 }
 
-function isContextOverflowException(error: unknown, model: Model<Api>): boolean {
+import {
+	isCollaborationPrompt,
+	parseTurnImpulse,
+	turnNeedsRoomResponse,
+	type TurnImpulse,
+	type TurnImpulseKind,
+} from "./turn-impulse.ts";
+
+export {
+	isCollaborationPrompt,
+	parseTurnImpulse,
+	turnNeedsRoomResponse,
+	type TurnImpulse,
+	type TurnImpulseKind,
+};
+
+export function isContextOverflowException(error: unknown, model: Model<Api>): boolean {
 	const errorMessage = error instanceof Error ? error.message : String(error);
 	const message = {
 		role: "assistant",
@@ -224,87 +231,6 @@ function actionSummaryText(actions: PublicActionSummary[]): string {
 		.join("\n");
 }
 
-function parseTurnImpulse(text: string): TurnImpulse | undefined {
-	const jsonText = text.trim().match(/\{[\s\S]*\}/)?.[0];
-	if (!jsonText) {
-		return undefined;
-	}
-
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(jsonText);
-	} catch {
-		return undefined;
-	}
-	if (typeof parsed !== "object" || parsed === null) {
-		return undefined;
-	}
-
-	const record = parsed as Record<string, unknown>;
-	const action = record.action;
-	const kind = record.kind;
-	if ((action !== "speak" && action !== "finish" && action !== "pass") || typeof kind !== "string") {
-		return undefined;
-	}
-	if (!["add", "challenge", "clarify", "synthesize", "final", "none"].includes(kind)) {
-		return undefined;
-	}
-
-	const rawUrgency =
-		typeof record.urgency === "number" ? record.urgency : Number.parseInt(String(record.urgency ?? 0), 10);
-	const urgency = Number.isFinite(rawUrgency) ? Math.max(0, Math.min(100, rawUrgency)) : 0;
-	return {
-		action,
-		kind: kind as TurnImpulseKind,
-		urgency,
-		reason: typeof record.reason === "string" ? record.reason : undefined,
-	};
-}
-
-function turnNeedsRoomResponse(text: string): boolean {
-	const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
-	if (!normalized) {
-		return false;
-	}
-
-	const asksRoomForCoordination =
-		/\b(does|do|can|should|shall)\s+(the\s+)?room\s+(agree|want|prefer|approve|confirm)\b/.test(normalized) ||
-		/\b(room|everyone|we)\s+(agree|aligned|comfortable|ready)\b/.test(normalized) ||
-		/\b(any|no)\s+(objections|concerns)\b/.test(normalized) ||
-		/\b(can|should|shall)\s+i\s+(proceed|write|edit|create|make|apply)\b/.test(normalized);
-
-	const proposesImmediateWrite =
-		/\bintended action:\s*i\s+will\s+(write|edit|create|update|modify|apply)\b/.test(normalized) ||
-		/\bi\s+will\s+(write|edit|create|update|modify|apply)\s+.+\b(file|deck|document|patch|change)\b/.test(normalized);
-
-	const endsWithCoordinationQuestion =
-		/\?\s*$/.test(normalized) &&
-		/\b(agree|agreement|aligned|approval|approve|proceed|next step|filename|write|edit|create|room)\b/.test(
-			normalized,
-		);
-
-	const assignsNextActionOrHandsOff =
-		/\byour (write|turn|move|response|call|update|edit|save|critique|reply)\b/.test(normalized) ||
-		/\b(gpt|claude|anthropic|openai|gemini|google)[^.!?\n]{0,60}\b(should|will|please|needs? to|must)\s+(write|edit|update|save|create|respond|confirm|reply|do|add|fix|patch|address|review|critique|push back|weigh in|take|incorporate|fold|draft)\b/.test(normalized) ||
-		/\b(over to|handing (this|the floor|over)( back)?( to)?|back to)\s+(you|gpt|claude|anthropic|openai|gemini|google)\b/.test(normalized) ||
-		/\bafter you (save|write|edit|finish|respond|reply|incorporate|update)\b/.test(normalized) ||
-		/\b(next,?\s+|then,?\s+)?(gpt|claude|anthropic|openai|gemini|google|you)\s+(should|will|please|needs? to|must)\s+(write|edit|update|save|create|respond|do|incorporate|fold|address)\b/.test(normalized) ||
-		/\byour (write|update|edit|save|response|critique)\s+(since|because|now|next|first)\b/.test(normalized);
-
-	return (
-		asksRoomForCoordination ||
-		endsWithCoordinationQuestion ||
-		proposesImmediateWrite ||
-		assignsNextActionOrHandsOff
-	);
-}
-
-function isCollaborationPrompt(humanPrompt: string): boolean {
-	const p = humanPrompt.toLowerCase();
-	return /\b(both|together|debate|back\s*and\s*forth|iterate|until complete|until done|socrat(ic|es)|without me|amongst yoursel(f|ves)|with each other|each of you)\b/.test(
-		p,
-	);
-}
 
 export class ThinktankRoomRuntime {
 	private services: AgentSessionServices;

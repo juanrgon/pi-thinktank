@@ -7,6 +7,9 @@
     ".": "./index.ts",
     "./runtime": "./lib.ts"
   },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  },
   "pi": {
     "extensions": ["./index.ts"]
   },
