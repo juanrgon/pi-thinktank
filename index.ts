@@ -13,7 +13,8 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Box, type Component, Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
-import { type ThinktankRoomAgentInfo, ThinktankRoomRuntime } from "./room-runtime.ts";
+import type { ClassifiedAgentError } from "./agent-error.ts";
+import { type AgentTurnPhase, type ThinktankRoomAgentInfo, ThinktankRoomRuntime } from "./room-runtime.ts";
 import {
 	getThinktankRosterEntryReference,
 	selectDefaultThinktankRosterModels,
@@ -248,6 +249,17 @@ function extractLiveStateFromAssistantMessage(
 		thinking: tailText(thinkingParts.join("\n\n"), LIVE_THINKING_LIMIT),
 		toolCalls,
 	};
+}
+
+function formatAgentTurnErrorText(error: ClassifiedAgentError & { partialText?: string }): string {
+	const lines = [`Category: \`${error.category}\``, "", error.summary];
+	if (error.hint) {
+		lines.push("", `Hint: ${error.hint}`);
+	}
+	if (error.partialText) {
+		lines.push("", "Partial output before failure:", "", error.partialText);
+	}
+	return lines.join("\n");
 }
 
 class LiveRoomWidget implements Component {
@@ -627,6 +639,30 @@ export default function (pi: ExtensionAPI) {
 				}
 				send({
 					kind: "agent",
+					agent,
+					text,
+					transcriptFile: room?.transcriptFile,
+				});
+			},
+			onAgentTurnError(
+				agent: ThinktankRoomAgentInfo,
+				phase: AgentTurnPhase,
+				error: ClassifiedAgentError & { partialText?: string },
+			): void {
+				const text = formatAgentTurnErrorText(error);
+				ctx.ui.setStatus("thinktank-active", `${agent.visibleName} failed during ${phase}`);
+				ctx.ui.setWorkingMessage(`${agent.visibleName} failed`);
+				updateLiveState({
+					visible: true,
+					status: `${agent.visibleName} failed during ${phase}`,
+					agent,
+					text,
+					thinking: "",
+					toolCalls: [],
+				});
+				send({
+					kind: "error",
+					title: `${agent.visibleName} failed (${error.category})`,
 					agent,
 					text,
 					transcriptFile: room?.transcriptFile,

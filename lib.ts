@@ -1,6 +1,11 @@
 export {
+	classifyAgentError,
 	ThinktankRoomRuntime,
+	type AgentErrorCategory,
+	type AgentTurnPhase,
 	type AgentTurnResult,
+	type ClassifiedAgentError,
+	type ThinktankAgentTurnError,
 	type ThinktankRoomAgentInfo,
 	type ThinktankRoomCallbacks,
 } from "./room-runtime.ts";

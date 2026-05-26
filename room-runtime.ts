@@ -6,6 +6,7 @@ import type { Api, AssistantMessage, ImageContent, Model, TextContent } from "@e
 import { clampThinkingLevel, completeSimple, isContextOverflow } from "@earendil-works/pi-ai";
 import type { AgentSession, AgentSessionEvent, AgentSessionServices } from "@earendil-works/pi-coding-agent";
 import { createAgentSessionFromServices, SessionManager } from "@earendil-works/pi-coding-agent";
+import { classifyAgentError, type ClassifiedAgentError } from "./agent-error.ts";
 import {
 	getThinktankModelReference,
 	getThinktankVisibleName,
@@ -15,6 +16,22 @@ import {
 	type ThinktankLabDefinition,
 	type ThinktankRosterModels,
 } from "./roster.ts";
+import {
+	isCollaborationPrompt,
+	parseTurnImpulse,
+	turnNeedsRoomResponse,
+	type TurnImpulse,
+	type TurnImpulseKind,
+} from "./turn-impulse.ts";
+
+export { classifyAgentError, type AgentErrorCategory, type ClassifiedAgentError } from "./agent-error.ts";
+export {
+	isCollaborationPrompt,
+	parseTurnImpulse,
+	turnNeedsRoomResponse,
+	type TurnImpulse,
+	type TurnImpulseKind,
+} from "./turn-impulse.ts";
 
 interface RankedTurnImpulse {
 	agent: LabAgentRuntime;
@@ -30,10 +47,17 @@ export interface ThinktankRoomAgentInfo {
 	thinkingLevel: ThinkingLevel;
 }
 
+export type AgentTurnPhase = "opening" | "discussion" | "closing" | "response";
+
+export interface ThinktankAgentTurnError extends ClassifiedAgentError {
+	partialText?: string;
+}
+
 export interface ThinktankRoomCallbacks {
 	onStatus?(message: string): void;
 	onAgentTurnStart?(agent: ThinktankRoomAgentInfo): void;
 	onAgentTurnEnd?(agent: ThinktankRoomAgentInfo, text: string): void;
+	onAgentTurnError?(agent: ThinktankRoomAgentInfo, phase: AgentTurnPhase, error: ThinktankAgentTurnError): void;
 	onAgentEvent?(agent: ThinktankRoomAgentInfo, session: AgentSession, event: AgentSessionEvent): void | Promise<void>;
 	onInterrupt?(
 		interruptedAgent: ThinktankRoomAgentInfo,
@@ -171,22 +195,6 @@ function getLastAssistantText(session: AgentSession): string {
 	return "";
 }
 
-import {
-	isCollaborationPrompt,
-	parseTurnImpulse,
-	turnNeedsRoomResponse,
-	type TurnImpulse,
-	type TurnImpulseKind,
-} from "./turn-impulse.ts";
-
-export {
-	isCollaborationPrompt,
-	parseTurnImpulse,
-	turnNeedsRoomResponse,
-	type TurnImpulse,
-	type TurnImpulseKind,
-};
-
 export function isContextOverflowException(error: unknown, model: Model<Api>): boolean {
 	const errorMessage = error instanceof Error ? error.message : String(error);
 	const message = {
@@ -241,6 +249,7 @@ export class ThinktankRoomRuntime {
 	private agents: LabAgentRuntime[] = [];
 	private transcript: TranscriptTurn[] = [];
 	private publicActions: PublicActionSummary[] = [];
+	private pendingPublicActions = new Map<string, PublicActionSummary>();
 	private currentHumanPrompt = "";
 	private currentHumanImages: ImageContent[] = [];
 	private agentsThatReceivedHumanImages = new Set<LabId>();
@@ -365,6 +374,10 @@ export class ThinktankRoomRuntime {
 		}
 	}
 
+	private getPublicActionKey(agent: LabAgentRuntime, toolCallId: string): string {
+		return `${agent.definition.id}:${toolCallId}`;
+	}
+
 	private recordPublicAction(agent: LabAgentRuntime, event: AgentSessionEvent): void {
 		if (event.type === "tool_execution_start") {
 			this.appendRoomEvent({
@@ -376,12 +389,14 @@ export class ThinktankRoomRuntime {
 				toolName: event.toolName,
 				args: event.args,
 			});
-			this.publicActions.push({
+			const summary: PublicActionSummary = {
 				agent: agent.visibleName,
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
 				args: event.args,
-			});
+			};
+			this.publicActions.push(summary);
+			this.pendingPublicActions.set(this.getPublicActionKey(agent, event.toolCallId), summary);
 			return;
 		}
 
@@ -400,14 +415,8 @@ export class ThinktankRoomRuntime {
 			isError: event.isError,
 		});
 
-		const existing = [...this.publicActions]
-			.reverse()
-			.find(
-				(action) =>
-					action.agent === agent.visibleName &&
-					action.toolCallId === event.toolCallId &&
-					action.result === undefined,
-			);
+		const key = this.getPublicActionKey(agent, event.toolCallId);
+		const existing = this.pendingPublicActions.get(key);
 		if (!existing) {
 			this.publicActions.push({
 				agent: agent.visibleName,
@@ -421,13 +430,54 @@ export class ThinktankRoomRuntime {
 		}
 		existing.result = JSON.stringify(event.result.content);
 		existing.isError = event.isError;
+		this.pendingPublicActions.delete(key);
 	}
 
 	private appendRoomEvent(entry: Record<string, unknown>): void {
+		// Keep transcript writes synchronous for now: events are tiny JSONL records,
+		// ordering is important for room debugging, and an async write queue belongs
+		// in a broader runtime refactor.
 		appendFileSync(this.transcriptPath, `${JSON.stringify({ timestamp: new Date().toISOString(), ...entry })}\n`, {
 			encoding: "utf8",
 			mode: 0o600,
 		});
+	}
+
+	private recordAgentTurnError(
+		agent: LabAgentRuntime,
+		phase: AgentTurnPhase,
+		error: unknown,
+		partialText?: string,
+	): ThinktankAgentTurnError {
+		const classified = classifyAgentError(error);
+		const trimmedPartialText = partialText?.trim();
+		const turnError: ThinktankAgentTurnError = trimmedPartialText
+			? { ...classified, partialText: trimmedPartialText }
+			: classified;
+
+		this.appendRoomEvent({
+			type: "agent_error",
+			phase,
+			agent: agent.visibleName,
+			provider: agent.model.provider,
+			model: agent.model.id,
+			thinkingLevel: agent.thinkingLevel,
+			category: classified.category,
+			errorSummary: classified.summary,
+			errorRaw: classified.raw,
+			hint: classified.hint,
+			partialText: trimmedPartialText,
+		});
+
+		const hint = classified.hint ? `\nHint: ${classified.hint}` : "";
+		const partial = trimmedPartialText ? `\nPartial output before failure:\n${trimmedPartialText}` : "";
+		this.transcript.push({
+			speaker: `system (${agent.visibleName} error)`,
+			text: `Turn failed: ${classified.category} — ${classified.summary}${hint}${partial}`,
+		});
+
+		this.callbacks.onAgentTurnError?.(getAgentInfo(agent), phase, turnError);
+		return turnError;
 	}
 
 	private async completeHidden(
@@ -944,6 +994,7 @@ Decide if you need to interrupt them immediately.`;
 		this.agentsThatReceivedHumanImages = new Set();
 		this.transcript = [];
 		this.publicActions = [];
+		this.pendingPublicActions = new Map();
 		this.appendRoomEvent({
 			type: "human_turn",
 			text: prompt,
@@ -962,13 +1013,22 @@ Decide if you need to interrupt them immediately.`;
 				spokenAgentIds.add(agent.definition.id);
 
 				this.callbacks.onAgentTurnStart?.(getAgentInfo(agent));
-				await this.promptAgentWithOverflowRecovery(
-					agent,
-					this.buildPromptForAgent(agent, next.kind, "opening"),
-					this.getImagesForAgentPrompt(agent),
-				);
-				const finalText = getLastAssistantText(agent.session);
-				if (finalText) {
+				let finalText = "";
+				let turnErrored = false;
+				try {
+					await this.promptAgentWithOverflowRecovery(
+						agent,
+						this.buildPromptForAgent(agent, next.kind, "opening"),
+						this.getImagesForAgentPrompt(agent),
+					);
+					finalText = getLastAssistantText(agent.session);
+				} catch (error) {
+					turnErrored = true;
+					finalText = getLastAssistantText(agent.session);
+					this.recordAgentTurnError(agent, "opening", error, finalText);
+					// TODO(phase-5): consult policy.onAgentError. Default is continue.
+				}
+				if (!turnErrored && finalText) {
 					this.transcript.push({ speaker: agent.visibleName, text: finalText });
 					this.appendRoomEvent({
 						type: "agent_turn",
@@ -979,7 +1039,9 @@ Decide if you need to interrupt them immediately.`;
 						text: finalText,
 					});
 				}
-				this.callbacks.onAgentTurnEnd?.(getAgentInfo(agent), finalText);
+				if (!turnErrored) {
+					this.callbacks.onAgentTurnEnd?.(getAgentInfo(agent), finalText);
+				}
 			}
 
 			const remainingTurns = Math.max(0, MAX_ROOM_TURNS - this.transcript.length);
@@ -1063,13 +1125,22 @@ Decide if you need to interrupt them immediately.`;
 				const phase = isRespondingToOpenQuestion ? "response" : kind === "final" ? "closing" : "discussion";
 
 				this.callbacks.onAgentTurnStart?.(getAgentInfo(agent));
-				await this.promptAgentWithOverflowRecovery(
-					agent,
-					this.buildPromptForAgent(agent, kind, phase),
-					this.getImagesForAgentPrompt(agent),
-				);
-				const finalText = getLastAssistantText(agent.session);
-				if (finalText) {
+				let finalText = "";
+				let turnErrored = false;
+				try {
+					await this.promptAgentWithOverflowRecovery(
+						agent,
+						this.buildPromptForAgent(agent, kind, phase),
+						this.getImagesForAgentPrompt(agent),
+					);
+					finalText = getLastAssistantText(agent.session);
+				} catch (error) {
+					turnErrored = true;
+					finalText = getLastAssistantText(agent.session);
+					this.recordAgentTurnError(agent, phase, error, finalText);
+					// TODO(phase-5): consult policy.onAgentError. Default is continue.
+				}
+				if (!turnErrored && finalText) {
 					this.transcript.push({ speaker: agent.visibleName, text: finalText });
 					this.appendRoomEvent({
 						type: "agent_turn",
@@ -1080,7 +1151,9 @@ Decide if you need to interrupt them immediately.`;
 						text: finalText,
 					});
 				}
-				this.callbacks.onAgentTurnEnd?.(getAgentInfo(agent), finalText);
+				if (!turnErrored) {
+					this.callbacks.onAgentTurnEnd?.(getAgentInfo(agent), finalText);
+				}
 
 				if (isRespondingToOpenQuestion) {
 					forcedResponseTurnsRemaining--;
