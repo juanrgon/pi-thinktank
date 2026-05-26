@@ -3,6 +3,9 @@ export {
 	classifyAgentError,
 	decidePrecompaction,
 	DEFAULT_PRECOMPACTION_THRESHOLD_RATIO,
+	getThinktankLabSessionRoot,
+	getThinktankRoomSessionDir,
+	getThinktankTranscriptPath,
 	isAssistantContinuationAfterCompactionError,
 	shouldRetryPromptAfterCompactionFailure,
 	ThinktankRoomRuntime,
@@ -17,6 +20,7 @@ export {
 	type PrecompactionDecisionReason,
 	type PrecompactionSettings,
 	type ThinktankAgentTurnError,
+	type ThinktankLabSessionInfo,
 	type ThinktankRoomAgentInfo,
 	type ThinktankRoomCallbacks,
 } from "./room-runtime.ts";

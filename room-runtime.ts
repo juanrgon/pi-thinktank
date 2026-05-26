@@ -136,6 +136,18 @@ interface LabAgentRuntime {
 	unsubscribe: () => void;
 }
 
+export interface ThinktankLabSessionInfo {
+	id: LabId;
+	lab: string;
+	active: boolean;
+	visibleName?: string;
+	provider?: string;
+	model?: string;
+	thinkingLevel?: ThinkingLevel;
+	sessionDir: string;
+	sessionFile?: string;
+}
+
 const MAX_ROOM_TURNS = 1000;
 const MIN_DYNAMIC_TURNS_AFTER_OPENING = 0;
 const MAX_POST_COMPACTION_PROMPT_RETRIES = 1;
@@ -180,11 +192,23 @@ Return exactly one JSON object and no prose:
 
 Urgency is an integer from 0 to 100.`;
 
-function createRoomSessionDir(cwd: string): string {
+export function getThinktankRoomSessionDir(cwd: string): string {
 	const safeCwd = `--${resolve(cwd)
 		.replace(/^[/\\]/, "")
 		.replace(/[/\\:]/g, "-")}--`;
-	const dir = join(homedir(), ".ai-thinktank", "room-sessions", safeCwd);
+	return join(homedir(), ".ai-thinktank", "room-sessions", safeCwd);
+}
+
+export function getThinktankLabSessionRoot(cwd: string): string {
+	return join(getThinktankRoomSessionDir(cwd), "labs");
+}
+
+export function getThinktankTranscriptPath(cwd: string): string {
+	return join(getThinktankRoomSessionDir(cwd), "transcript.jsonl");
+}
+
+function createRoomSessionDir(cwd: string): string {
+	const dir = getThinktankRoomSessionDir(cwd);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	return dir;
 }
@@ -320,6 +344,31 @@ export class ThinktankRoomRuntime {
 
 	get transcriptFile(): string {
 		return this.transcriptPath;
+	}
+
+	get sessionRoot(): string {
+		return this.roomSessionDir;
+	}
+
+	get labSessionRoot(): string {
+		return join(this.roomSessionDir, "labs");
+	}
+
+	getLabSessionInfos(): ThinktankLabSessionInfo[] {
+		return THINKTANK_LAB_DEFINITIONS.map((definition) => {
+			const agent = this.agents.find((candidate) => candidate.definition.id === definition.id);
+			return {
+				id: definition.id,
+				lab: definition.shortName,
+				active: agent !== undefined,
+				visibleName: agent?.visibleName,
+				provider: agent?.model.provider,
+				model: agent?.model.id,
+				thinkingLevel: agent?.thinkingLevel,
+				sessionDir: join(this.roomSessionDir, "labs", definition.id),
+				sessionFile: agent?.session.sessionFile,
+			};
+		});
 	}
 
 	async ready(): Promise<void> {

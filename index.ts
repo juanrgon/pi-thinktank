@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -14,7 +14,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, type Component, Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import type { ClassifiedAgentError } from "./agent-error.ts";
-import { type AgentTurnPhase, type ThinktankRoomAgentInfo, ThinktankRoomRuntime } from "./room-runtime.ts";
+import {
+	type AgentTurnPhase,
+	getThinktankLabSessionRoot,
+	getThinktankRoomSessionDir,
+	getThinktankTranscriptPath,
+	type ThinktankLabSessionInfo,
+	type ThinktankRoomAgentInfo,
+	ThinktankRoomRuntime,
+} from "./room-runtime.ts";
 import {
 	getThinktankRosterEntryReference,
 	selectDefaultThinktankRosterModels,
@@ -173,6 +181,39 @@ function formatRoster(roster: ThinktankRoster): string {
 			? `${definition.shortName}: ${entry.disabled ? "disabled " : ""}${getThinktankRosterEntryReference(entry)}`
 			: `${definition.shortName}: missing`;
 	}).join(" | ");
+}
+
+function formatLabSessionInfo(info: ThinktankLabSessionInfo): string {
+	const status = info.active
+		? `${info.visibleName ?? info.lab} (${info.provider}/${info.model}:${info.thinkingLevel})`
+		: "not active in current roster";
+	const sessionFile = info.sessionFile ? `\n  session file: \`${info.sessionFile}\`` : "";
+	return `- **${info.lab}**: ${status}\n  directory: \`${info.sessionDir}\`${sessionFile}`;
+}
+
+function formatThinktankSessions(ctx: ExtensionContext, activeRoom: ThinktankRoomRuntime | undefined): string {
+	const roomSessionRoot = activeRoom?.sessionRoot ?? getThinktankRoomSessionDir(ctx.cwd);
+	const labSessionRoot = activeRoom?.labSessionRoot ?? getThinktankLabSessionRoot(ctx.cwd);
+	const transcriptFile = activeRoom?.transcriptFile ?? getThinktankTranscriptPath(ctx.cwd);
+	const labs: ThinktankLabSessionInfo[] =
+		activeRoom?.getLabSessionInfos() ??
+		THINKTANK_LAB_DEFINITIONS.map((definition) => ({
+			id: definition.id,
+			lab: definition.shortName,
+			active: false,
+			sessionDir: join(labSessionRoot, definition.id),
+		}));
+
+	return [
+		activeRoom ? "Active Thinktank room session:" : "No active Thinktank room has been created yet. These paths will be used when it starts:",
+		"",
+		`- Structured room transcript: \`${transcriptFile}\``,
+		`- Room session root: \`${roomSessionRoot}\``,
+		`- Lab session root: \`${labSessionRoot}\``,
+		"",
+		"Lab sessions:",
+		...labs.map(formatLabSessionInfo),
+	].join("\n");
 }
 
 function preview(value: unknown, maxLength = 900): string {
@@ -795,12 +836,51 @@ export default function (pi: ExtensionAPI) {
 		void drainQueue();
 	}
 
+	async function resetThinktankLabSessions(ctx: ExtensionContext): Promise<void> {
+		if (room?.isRunning || drainingQueue) {
+			ctx.ui.notify("Wait for the current Thinktank room turn to finish before resetting lab sessions.", "error");
+			return;
+		}
+
+		const labSessionRoot = room?.labSessionRoot ?? getThinktankLabSessionRoot(ctx.cwd);
+		const confirmed = await ctx.ui.confirm(
+			"Reset Thinktank lab sessions?",
+			`This deletes private Lab Agent session files under:\n\n${labSessionRoot}\n\nThe shared room transcript is preserved.`,
+		);
+		if (!confirmed) {
+			ctx.ui.notify("Thinktank lab session reset cancelled.", "info");
+			return;
+		}
+
+		queue = [];
+		room?.dispose();
+		room = undefined;
+		rmSync(labSessionRoot, { recursive: true, force: true });
+		mkdirSync(labSessionRoot, { recursive: true, mode: 0o700 });
+		updateLiveState({
+			visible: true,
+			status: "Thinktank lab sessions reset",
+			agent: undefined,
+			text: `Deleted private Lab Agent sessions under:\n\n${labSessionRoot}`,
+			thinking: "",
+			toolCalls: [],
+		});
+		send({
+			kind: "status",
+			title: "Thinktank lab sessions reset",
+			text: `Deleted private Lab Agent sessions under:\n\n\`${labSessionRoot}\`\n\nThe next Thinktank prompt will create fresh private lab sessions.`,
+			transcriptFile: getThinktankTranscriptPath(ctx.cwd),
+		});
+		ctx.ui.notify("Thinktank lab sessions reset. The next prompt will start fresh private lab sessions.", "info");
+		updateRosterStatus(ctx);
+	}
+
 	pi.registerMessageRenderer<ThinktankRoomMessageDetails>(MESSAGE_TYPE, (message, options, theme) =>
 		renderThinktankMessage(message, options)(theme),
 	);
 
 	pi.registerCommand("thinktank", {
-		description: "Show or toggle Thinktank room routing: /thinktank [on|off|status]",
+		description: "Show or toggle Thinktank room routing: /thinktank [on|off|status|sessions|reset-labs]",
 		handler: async (args, ctx) => {
 			const value = args.trim().toLowerCase();
 			if (!value || value === "status") {
@@ -809,8 +889,25 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			if (value === "sessions") {
+				const transcriptFile = room?.transcriptFile ?? getThinktankTranscriptPath(ctx.cwd);
+				send({
+					kind: "status",
+					title: "Thinktank sessions",
+					text: formatThinktankSessions(ctx, room),
+					transcriptFile,
+				});
+				updateRosterStatus(ctx);
+				return;
+			}
+
+			if (value === "reset-labs" || value === "reset labs") {
+				await resetThinktankLabSessions(ctx);
+				return;
+			}
+
 			if (value !== "on" && value !== "off") {
-				ctx.ui.notify("Usage: /thinktank [on|off|status]", "error");
+				ctx.ui.notify("Usage: /thinktank [on|off|status|sessions|reset-labs]", "error");
 				return;
 			}
 
