@@ -25,6 +25,7 @@ import {
 	type ThinktankLabDefinition,
 	type ThinktankRosterModels,
 } from "./roster.ts";
+import { formatTranscript } from "./transcript-text.ts";
 import {
 	isCollaborationPrompt,
 	parseTurnImpulse,
@@ -249,11 +250,8 @@ export function isContextOverflowException(error: unknown, model: Model<Api>): b
 	return isContextOverflow(message, model.contextWindow);
 }
 
-function transcriptText(turns: TranscriptTurn[]): string {
-	if (turns.length === 0) {
-		return "(No Lab Agent has spoken yet.)";
-	}
-	return turns.map((turn) => `${turn.speaker}:\n${turn.text}`).join("\n\n");
+function transcriptText(turns: TranscriptTurn[], options?: { limit?: number }): string {
+	return formatTranscript(turns, options);
 }
 
 function actionSummaryText(actions: PublicActionSummary[]): string {
@@ -665,7 +663,7 @@ ${lastSpeakerId ?? "none"}
 
 Public transcript:
 
-${transcriptText(this.transcript)}
+${transcriptText(this.transcript, { limit: 20 })}
 
 Public action summaries:
 
@@ -955,7 +953,7 @@ ${this.currentHumanPrompt}
 
 Turn context (last 2 turns):
 
-${transcriptText(this.transcript.slice(-2))}
+${transcriptText(this.transcript, { limit: 2 })}
 
 The active speaker is ${this.activeTurn.agent.visibleName}.
 They have been speaking for ${Math.floor((now - this.activeTurn.startedAt) / 1000)} seconds.
