@@ -1,0 +1,33 @@
+export {
+	ThinktankRoomRuntime,
+	type AgentTurnResult,
+	type ThinktankRoomAgentInfo,
+	type ThinktankRoomCallbacks,
+} from "./room-runtime.ts";
+
+export {
+	DEFAULT_THINKTANK_THINKING_LEVEL,
+	THINKTANK_LAB_DEFINITIONS,
+	THINKTANK_LAB_IDS,
+	clampThinktankThinkingLevel,
+	getThinktankModelReference,
+	getThinktankModelsForLab,
+	getThinktankRosterEntryReference,
+	getThinktankSupportedThinkingLevels,
+	getThinktankVisibleName,
+	isThinktankModelEligibleForLab,
+	selectDefaultThinktankRoster,
+	selectDefaultThinktankRosterModels,
+	selectThinktankLabModel,
+	selectThinktankRosterEntry,
+	type LabId,
+	type ThinktankAgentModelSelection,
+	type ThinktankAgentModelSelections,
+	type ThinktankAgentRosterSelection,
+	type ThinktankAgentRosterSelections,
+	type ThinktankAvailableModel,
+	type ThinktankLabDefinition,
+	type ThinktankRoster,
+	type ThinktankRosterEntry,
+	type ThinktankRosterModels,
+} from "./roster.ts";

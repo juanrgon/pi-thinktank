@@ -94,10 +94,10 @@ interface LabAgentRuntime {
 	unsubscribe: () => void;
 }
 
-const MAX_ROOM_TURNS = 10;
+const MAX_ROOM_TURNS = 1000;
 const MIN_DYNAMIC_TURNS_AFTER_OPENING = 0;
 const MAX_CONTEXT_OVERFLOW_RETRIES = 1;
-const MAX_OPEN_QUESTION_RESPONSE_TURNS = 2;
+const MAX_OPEN_QUESTION_RESPONSE_TURNS = 1000;
 const READ_WRITE_TOOL_WARNING = `Tool use is public in this room. Reads, searches, and bash exploration may proceed.
 Before edits, writes, or destructive shell commands, state the intended change in the public conversation and wait for the room to converge.`;
 
@@ -393,7 +393,7 @@ export class ThinktankRoomRuntime {
 
 			const sessionDir = join(this.roomSessionDir, "labs", definition.id);
 			mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
-			const sessionManager = SessionManager.create(this.cwd, sessionDir);
+			const sessionManager = SessionManager.continueRecent(this.cwd, sessionDir);
 			const created = await createAgentSessionFromServices({
 				services: this.services,
 				sessionManager,
