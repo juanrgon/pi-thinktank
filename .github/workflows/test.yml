@@ -1,0 +1,34 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run test suite
+        run: npm test
+
+      - name: Syntax-check runtime files
+        # Tests cover the pure-helper files via import. These files are NOT
+        # imported by tests (they pull in @earendil-works/pi-* peer deps),
+        # so check them directly so the workflow catches obvious breakage.
+        run: |
+          node --experimental-strip-types --check turn-impulse.ts
+          node --experimental-strip-types --check agent-error.ts
+          node --experimental-strip-types --check room-runtime.ts
+          node --experimental-strip-types --check index.ts
+          node --experimental-strip-types --check roster.ts
+          node --experimental-strip-types --check roster-selector.ts
+          node --experimental-strip-types --check lib.ts
