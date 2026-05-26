@@ -25,6 +25,11 @@ import {
 	type ThinktankLabDefinition,
 	type ThinktankRosterModels,
 } from "./roster.ts";
+import {
+	formatInterruptionRecoveryContext,
+	formatInterruptionTranscriptText,
+	type InterruptionContext,
+} from "./interruption.ts";
 import { formatTranscript } from "./transcript-text.ts";
 import {
 	isCollaborationPrompt,
@@ -35,6 +40,11 @@ import {
 } from "./turn-impulse.ts";
 
 export { classifyAgentError, type AgentErrorCategory, type ClassifiedAgentError } from "./agent-error.ts";
+export {
+	formatInterruptionRecoveryContext,
+	formatInterruptionTranscriptText,
+	type InterruptionContext,
+} from "./interruption.ts";
 export {
 	isAssistantContinuationAfterCompactionError,
 	shouldRetryPromptAfterCompactionFailure,
@@ -313,12 +323,7 @@ export class ThinktankRoomRuntime {
 	forcedNextSpeaker?: LabAgentRuntime;
 	interruptionLock = false;
 	lastGlobalInterruptAt = 0;
-	private lastInterruption?: {
-		interruptedAgentName: string;
-		reason: string;
-		partialText: string;
-		toolCallsCompleted: number;
-	};
+	private lastInterruption?: InterruptionContext;
 
 	constructor(options: {
 		services: AgentSessionServices;
@@ -601,7 +606,7 @@ export class ThinktankRoomRuntime {
 	}
 
 	private recordInterruptedTurn(agent: LabAgentRuntime, phase: AgentTurnPhase, result: Extract<AgentTurnResult, { status: "interrupted" }>): string {
-		const partialText = result.text.trim();
+		const partialText = formatInterruptionTranscriptText(result.text);
 		const interrupter = typeof result.interrupter === "string" ? result.interrupter : result.interrupter.visibleName;
 		const text = [
 			"Interrupted before completion.",
@@ -609,7 +614,7 @@ export class ThinktankRoomRuntime {
 			`Interrupted by: ${interrupter}`,
 			"",
 			"Partial visible output:",
-			partialText || "(No visible output captured before interruption.)",
+			partialText,
 		].join("\n");
 
 		this.transcript.push({ speaker: agent.visibleName, text });
@@ -858,21 +863,7 @@ Decide whether the room should continue. Take the floor when the latest turn cha
 
 		let interruptNotice = "";
 		if (this.lastInterruption) {
-			interruptNotice = `
-The previous turn was interrupted.
-
-Interrupted speaker:
-${this.lastInterruption.interruptedAgentName}
-
-Reason:
-${this.lastInterruption.reason}
-
-${this.lastInterruption.toolCallsCompleted > 0 ? "The interrupted turn may already have performed tool actions. Verify repository or disk state before continuing." : ""}
-
-Partial visible output:
-${this.lastInterruption.partialText}
-
-Respond to the interruption. Recover the useful content, correct course, and continue the room's work.`;
+			interruptNotice = formatInterruptionRecoveryContext(this.lastInterruption);
 			this.lastInterruption = undefined;
 		}
 
