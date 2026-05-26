@@ -1,4 +1,5 @@
 export {
+	applyPrecompactionCooldown,
 	classifyAgentError,
 	decidePrecompaction,
 	DEFAULT_PRECOMPACTION_THRESHOLD_RATIO,
@@ -11,6 +12,7 @@ export {
 	type ClassifiedAgentError,
 	type CompactionRetryState,
 	type ContextUsageSnapshot,
+	type PrecompactionCooldown,
 	type PrecompactionDecision,
 	type PrecompactionDecisionReason,
 	type PrecompactionSettings,

@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
-import { decidePrecompaction } from "../precompaction.ts";
+import { applyPrecompactionCooldown, decidePrecompaction } from "../precompaction.ts";
 
 const enabledSettings = { enabled: true, reserveTokens: 100, keepRecentTokens: 50 };
 const usage = { tokens: 800, contextWindow: 1000, percent: 80 };
@@ -64,5 +64,48 @@ describe("decidePrecompaction", () => {
 		assert.equal(decision.thresholdRatio, 1);
 		assert.equal(decision.shouldCompact, false);
 		assert.equal(decision.reason, "below_threshold");
+	});
+});
+
+describe("applyPrecompactionCooldown", () => {
+	test("keeps near-threshold compaction when no cooldown history exists", () => {
+		const decision = decidePrecompaction({ tokens: 810, contextWindow: 1000 }, enabledSettings, 0.9);
+		const cooled = applyPrecompactionCooldown(decision, { nowMs: 10_000, cooldownMs: 60_000 });
+		assert.equal(cooled.shouldCompact, true);
+		assert.equal(cooled.reason, "near_threshold");
+	});
+
+	test("suppresses near-threshold compaction during cooldown", () => {
+		const decision = decidePrecompaction({ tokens: 810, contextWindow: 1000 }, enabledSettings, 0.9);
+		const cooled = applyPrecompactionCooldown(decision, {
+			nowMs: 30_000,
+			lastCompactionAtMs: 0,
+			cooldownMs: 60_000,
+		});
+		assert.equal(cooled.shouldCompact, false);
+		assert.equal(cooled.reason, "cooldown");
+		assert.equal(cooled.cooldownRemainingMs, 30_000);
+	});
+
+	test("allows near-threshold compaction after cooldown", () => {
+		const decision = decidePrecompaction({ tokens: 810, contextWindow: 1000 }, enabledSettings, 0.9);
+		const cooled = applyPrecompactionCooldown(decision, {
+			nowMs: 60_000,
+			lastCompactionAtMs: 0,
+			cooldownMs: 60_000,
+		});
+		assert.equal(cooled.shouldCompact, true);
+		assert.equal(cooled.reason, "near_threshold");
+	});
+
+	test("does not suppress over-threshold compaction", () => {
+		const decision = decidePrecompaction({ tokens: 900, contextWindow: 1000 }, enabledSettings, 0.9);
+		const cooled = applyPrecompactionCooldown(decision, {
+			nowMs: 30_000,
+			lastCompactionAtMs: 0,
+			cooldownMs: 60_000,
+		});
+		assert.equal(cooled.shouldCompact, true);
+		assert.equal(cooled.reason, "over_threshold");
 	});
 });

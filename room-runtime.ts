@@ -12,6 +12,7 @@ import {
 	type CompactionRetryState,
 } from "./compaction-retry.ts";
 import {
+	applyPrecompactionCooldown,
 	decidePrecompaction,
 	DEFAULT_PRECOMPACTION_THRESHOLD_RATIO,
 } from "./precompaction.ts";
@@ -39,9 +40,11 @@ export {
 	type CompactionRetryState,
 } from "./compaction-retry.ts";
 export {
+	applyPrecompactionCooldown,
 	decidePrecompaction,
 	DEFAULT_PRECOMPACTION_THRESHOLD_RATIO,
 	type ContextUsageSnapshot,
+	type PrecompactionCooldown,
 	type PrecompactionDecision,
 	type PrecompactionDecisionReason,
 	type PrecompactionSettings,
@@ -128,6 +131,7 @@ interface LabAgentRuntime {
 	visibleName: string;
 	session: AgentSession;
 	lastCompactionEvent?: CompactionRetryState;
+	lastPrecompactionAtMs?: number;
 	unsubscribe: () => void;
 }
 
@@ -136,6 +140,7 @@ const MIN_DYNAMIC_TURNS_AFTER_OPENING = 0;
 const MAX_POST_COMPACTION_PROMPT_RETRIES = 1;
 const MAX_OPEN_QUESTION_RESPONSE_TURNS = 1000;
 const THINKTANK_PRECOMPACTION_THRESHOLD_RATIO = DEFAULT_PRECOMPACTION_THRESHOLD_RATIO;
+const THINKTANK_PRECOMPACTION_COOLDOWN_MS = 10 * 60 * 1000;
 const READ_WRITE_TOOL_WARNING = `Tool use is public in this room. Reads, searches, and bash exploration may proceed.
 Before edits, writes, or destructive shell commands, state the intended change in the public conversation and wait for the room to converge.`;
 
@@ -995,12 +1000,17 @@ Decide if you need to interrupt them immediately.`;
 	private async compactAgentIfNeeded(agent: LabAgentRuntime): Promise<void> {
 		const usage = agent.session.getContextUsage();
 		const settings = this.services.settingsManager.getCompactionSettings();
-		const decision = decidePrecompaction(usage, settings, THINKTANK_PRECOMPACTION_THRESHOLD_RATIO);
+		const baseDecision = decidePrecompaction(usage, settings, THINKTANK_PRECOMPACTION_THRESHOLD_RATIO);
+		const decision = applyPrecompactionCooldown(baseDecision, {
+			nowMs: Date.now(),
+			lastCompactionAtMs: agent.lastPrecompactionAtMs,
+			cooldownMs: THINKTANK_PRECOMPACTION_COOLDOWN_MS,
+		});
 		if (!decision.shouldCompact) {
 			return;
 		}
 
-		this.callbacks.onStatus?.(`${agent.visibleName} is compacting private context before taking the floor.`);
+		this.callbacks.onStatus?.(`${agent.visibleName} is refreshing private context before taking the floor.`);
 		this.appendRoomEvent({
 			type: "precompaction_requested",
 			agent: agent.visibleName,
@@ -1011,6 +1021,7 @@ Decide if you need to interrupt them immediately.`;
 			settings,
 		});
 
+		agent.lastPrecompactionAtMs = Date.now();
 		try {
 			await agent.session.compact(THINKTANK_PRECOMPACTION_INSTRUCTIONS);
 		} catch (error) {
@@ -1023,7 +1034,7 @@ Decide if you need to interrupt them immediately.`;
 				error: message,
 				decision,
 			});
-			this.callbacks.onStatus?.(`${agent.visibleName} pre-turn compaction failed; continuing with Pi's automatic fallback.`);
+			this.callbacks.onStatus?.(`${agent.visibleName} private context refresh failed; continuing with Pi's automatic fallback.`);
 		}
 	}
 

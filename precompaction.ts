@@ -20,6 +20,7 @@ export type PrecompactionDecisionReason =
 	| "unknown_tokens"
 	| "invalid_context_window"
 	| "below_threshold"
+	| "cooldown"
 	| "near_threshold"
 	| "over_threshold";
 
@@ -31,6 +32,16 @@ export interface PrecompactionDecision {
 	coreThresholdTokens?: number;
 	triggerTokens?: number;
 	thresholdRatio: number;
+	cooldownMs?: number;
+	cooldownRemainingMs?: number;
+	lastCompactionAtMs?: number;
+	nowMs?: number;
+}
+
+export interface PrecompactionCooldown {
+	nowMs: number;
+	lastCompactionAtMs?: number;
+	cooldownMs: number;
 }
 
 export const DEFAULT_PRECOMPACTION_THRESHOLD_RATIO = 0.9;
@@ -40,6 +51,33 @@ function clampRatio(ratio: number): number {
 		return DEFAULT_PRECOMPACTION_THRESHOLD_RATIO;
 	}
 	return Math.max(0, Math.min(1, ratio));
+}
+
+export function applyPrecompactionCooldown(
+	decision: PrecompactionDecision,
+	cooldown: PrecompactionCooldown,
+): PrecompactionDecision {
+	if (decision.reason !== "near_threshold" || !decision.shouldCompact) {
+		return decision;
+	}
+	if (cooldown.lastCompactionAtMs === undefined || cooldown.cooldownMs <= 0) {
+		return decision;
+	}
+
+	const elapsedMs = cooldown.nowMs - cooldown.lastCompactionAtMs;
+	if (elapsedMs >= cooldown.cooldownMs) {
+		return decision;
+	}
+
+	return {
+		...decision,
+		shouldCompact: false,
+		reason: "cooldown",
+		cooldownMs: cooldown.cooldownMs,
+		cooldownRemainingMs: Math.max(0, cooldown.cooldownMs - Math.max(0, elapsedMs)),
+		lastCompactionAtMs: cooldown.lastCompactionAtMs,
+		nowMs: cooldown.nowMs,
+	};
 }
 
 export function decidePrecompaction(
