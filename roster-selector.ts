@@ -14,9 +14,11 @@ import {
 } from "@earendil-works/pi-tui";
 import {
 	clampThinktankThinkingLevel,
+	getThinktankSupportedThinkingLevels,
+} from "./roster-thinking.ts";
+import {
 	getThinktankModelReference,
 	getThinktankModelsForLab,
-	getThinktankSupportedThinkingLevels,
 	type LabId,
 	THINKTANK_LAB_DEFINITIONS,
 	type ThinktankLabDefinition,

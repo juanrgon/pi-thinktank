@@ -36,14 +36,17 @@ export {
 } from "./room-runtime.ts";
 
 export {
+	clampThinktankThinkingLevel,
+	getThinktankSupportedThinkingLevels,
+} from "./roster-thinking.ts";
+
+export {
 	DEFAULT_THINKTANK_THINKING_LEVEL,
 	THINKTANK_LAB_DEFINITIONS,
 	THINKTANK_LAB_IDS,
-	clampThinktankThinkingLevel,
 	getThinktankModelReference,
 	getThinktankModelsForLab,
 	getThinktankRosterEntryReference,
-	getThinktankSupportedThinkingLevels,
 	getThinktankVisibleName,
 	isThinktankModelEligibleForLab,
 	selectDefaultThinktankRoster,

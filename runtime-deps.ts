@@ -17,6 +17,23 @@
 import type { ContextUsageSnapshot } from "./precompaction.ts";
 
 // ============================================================================
+// Thinking levels
+// ============================================================================
+
+/**
+ * Pi's ThinkingLevel type as a structural string union. Pi's real type is
+ * imported by runtime-default-deps.ts; this narrow version is what the
+ * runtime and tests work with.
+ */
+export type ThinkingLevelLike =
+	| "off"
+	| "minimal"
+	| "low"
+	| "medium"
+	| "high"
+	| "xhigh";
+
+// ============================================================================
 // Agent messages
 // ============================================================================
 
@@ -204,4 +221,77 @@ export interface ThinktankServicesLike<
 > {
 	readonly modelRegistry: ThinktankModelRegistryLike<TModel>;
 	readonly settingsManager: ThinktankSettingsManagerLike;
+}
+
+// ============================================================================
+// Runtime dependency injection surface (Option Y / F2.5)
+//
+// These are the Pi-package value imports that room-runtime.ts used to call
+// directly. Injecting them via the constructor lets tests substitute fakes
+// without resolving @earendil-works/pi-* at module load time.
+//
+// Production code passes `defaultRuntimeDeps` from runtime-default-deps.ts,
+// which is a thin pass-through to the real Pi functions. That file is the
+// only place in the runtime path that imports Pi values; room-runtime.ts
+// itself stays type-only against Pi.
+// ============================================================================
+
+/**
+ * Minimal shape of a Pi AssistantMessage as the runtime uses it. Pi's real
+ * AssistantMessage is wider; only these fields are read.
+ */
+export interface ThinktankAssistantMessageLike extends ThinktankAgentMessageLike {
+	readonly stopReason: string;
+	readonly errorMessage?: string;
+}
+
+export interface ThinktankCompletionPromptLike {
+	readonly systemPrompt: string;
+	readonly messages: ReadonlyArray<{
+		readonly role: string;
+		readonly content: string;
+		readonly timestamp: number;
+	}>;
+}
+
+export interface ThinktankCompletionAuthLike {
+	readonly apiKey: string;
+	readonly headers?: Record<string, string>;
+	readonly reasoning?: ThinkingLevelLike;
+}
+
+export interface ThinktankCreateLabSessionOptions {
+	readonly cwd: string;
+	readonly sessionDir: string;
+	readonly services: ThinktankServicesLike;
+	readonly model: ThinktankModelLike;
+	readonly thinkingLevel: ThinkingLevelLike;
+	readonly tools: ReadonlyArray<string>;
+}
+
+/**
+ * The three Pi value-imports that room-runtime.ts needs at runtime,
+ * exposed as injectable functions. Tests provide stubs; production uses
+ * `defaultRuntimeDeps` from runtime-default-deps.ts which forwards to the
+ * real Pi implementations.
+ */
+export interface ThinktankRuntimeDeps {
+	/** Wraps pi-ai clampThinkingLevel(model, level) -> level. */
+	clampThinkingLevel(model: ThinktankModelLike, level: ThinkingLevelLike): ThinkingLevelLike;
+
+	/** Wraps pi-ai completeSimple(model, prompt, auth) -> assistant message. */
+	completeSimple(
+		model: ThinktankModelLike,
+		prompt: ThinktankCompletionPromptLike,
+		auth: ThinktankCompletionAuthLike,
+	): Promise<ThinktankAssistantMessageLike>;
+
+	/**
+	 * Bundles pi-coding-agent's SessionManager.continueRecent +
+	 * createAgentSessionFromServices into a single injection point. Hides the
+	 * intermediate SessionManager handle from the runtime.
+	 */
+	createLabSession(options: ThinktankCreateLabSessionOptions): Promise<{
+		readonly session: ThinktankSessionLike;
+	}>;
 }

@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, type Component, Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import type { ClassifiedAgentError } from "./agent-error.ts";
+import { defaultRuntimeDeps } from "./runtime-default-deps.ts";
 import {
 	type AgentTurnPhase,
 	getThinktankLabSessionRoot,
@@ -774,6 +775,7 @@ export default function (pi: ExtensionAPI) {
 
 		room = new ThinktankRoomRuntime({
 			services: await ensureServices(ctx),
+			deps: defaultRuntimeDeps,
 			cwd: ctx.cwd,
 			rosterSelections: currentRoster,
 			callbacks: createCallbacks(ctx),

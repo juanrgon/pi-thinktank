@@ -1,6 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { clampThinkingLevel, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 
 export type LabId = "openai" | "google" | "anthropic";
 
@@ -77,17 +76,6 @@ export const THINKTANK_LAB_DEFINITIONS: ThinktankLabDefinition[] = [
 
 export function getThinktankModelReference(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
-}
-
-export function getThinktankSupportedThinkingLevels(model: Model<Api>): ThinkingLevel[] {
-	return getSupportedThinkingLevels(model) as ThinkingLevel[];
-}
-
-export function clampThinktankThinkingLevel(
-	model: Model<Api>,
-	thinkingLevel: ThinkingLevel | undefined,
-): ThinkingLevel {
-	return clampThinkingLevel(model, thinkingLevel ?? DEFAULT_THINKTANK_THINKING_LEVEL) as ThinkingLevel;
 }
 
 export function getThinktankRosterEntryReference(entry: ThinktankRosterEntry): string {
@@ -189,14 +177,16 @@ export function selectThinktankRosterEntry(
 	availableModels: Model<Api>[],
 	definition: ThinktankLabDefinition,
 	selection?: ThinktankAgentRosterSelection,
+	clampLevel?: (model: Model<Api>, level: ThinkingLevel | undefined) => ThinkingLevel,
 ): ThinktankRosterEntry | undefined {
 	const model = selectThinktankLabModel(availableModels, definition, selection);
 	if (!model) {
 		return undefined;
 	}
+	const requestedLevel = selection?.thinkingLevel ?? DEFAULT_THINKTANK_THINKING_LEVEL;
 	return {
 		model,
-		thinkingLevel: clampThinktankThinkingLevel(model, selection?.thinkingLevel),
+		thinkingLevel: clampLevel ? clampLevel(model, requestedLevel) : requestedLevel,
 		disabled: selection?.disabled,
 	};
 }
@@ -204,10 +194,11 @@ export function selectThinktankRosterEntry(
 export function selectDefaultThinktankRoster(
 	availableModels: Model<Api>[],
 	selections: ThinktankAgentRosterSelections = {},
+	clampLevel?: (model: Model<Api>, level: ThinkingLevel | undefined) => ThinkingLevel,
 ): ThinktankRoster {
 	const roster: ThinktankRoster = {};
 	for (const definition of THINKTANK_LAB_DEFINITIONS) {
-		const entry = selectThinktankRosterEntry(availableModels, definition, selections[definition.id]);
+		const entry = selectThinktankRosterEntry(availableModels, definition, selections[definition.id], clampLevel);
 		if (entry) {
 			roster[definition.id] = entry;
 		}

@@ -2,10 +2,8 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai";
-import { clampThinkingLevel, completeSimple, isContextOverflow } from "@earendil-works/pi-ai";
+import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { AgentSessionServices } from "@earendil-works/pi-coding-agent";
-import { createAgentSessionFromServices, SessionManager } from "@earendil-works/pi-coding-agent";
 import { classifyAgentError, type ClassifiedAgentError } from "./agent-error.ts";
 import {
 	DEFAULT_AGENT_FAILURE_POLICY_OPTIONS,
@@ -34,6 +32,7 @@ import {
 import type {
 	ThinktankAgentMessageLike,
 	ThinktankModelLike,
+	ThinktankRuntimeDeps,
 	ThinktankSessionEventLike,
 	ThinktankSessionLike,
 	ThinktankServicesLike,
@@ -289,27 +288,13 @@ function getLastAssistantText(session: ThinktankSessionLike): string {
 	return "";
 }
 
-export function isContextOverflowException(error: unknown, model: ThinktankModelLike): boolean {
-	const errorMessage = error instanceof Error ? error.message : String(error);
-	const message = {
-		role: "assistant",
-		content: [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "error",
-		errorMessage,
-		timestamp: Date.now(),
-	} as AssistantMessage;
-	return isContextOverflow(message, model.contextWindow ?? 0);
+export function isContextOverflowException(_error: unknown, _model: ThinktankModelLike): boolean {
+	// Deprecated. The runtime no longer uses this function; it was kept exported
+	// across earlier patches but never called internally or externally.
+	// Use ThinktankRuntimeDeps.completeSimple's stopReason/errorMessage handling
+	// or shouldRetryPromptAfterCompactionFailure from compaction-retry.ts instead.
+	// Stub returns false so any historical caller fails closed.
+	return false;
 }
 
 function transcriptText(turns: TranscriptTurn[], options?: { limit?: number }): string {
@@ -333,6 +318,7 @@ function actionSummaryText(actions: PublicActionSummary[]): string {
 
 export class ThinktankRoomRuntime {
 	private services: ThinktankServicesLike;
+	private deps: ThinktankRuntimeDeps;
 	private cwd: string;
 	private roomSessionDir: string;
 	private callbacks: ThinktankRoomCallbacks;
@@ -357,11 +343,13 @@ export class ThinktankRoomRuntime {
 
 	constructor(options: {
 		services: ThinktankServicesLike;
+		deps: ThinktankRuntimeDeps;
 		cwd: string;
 		rosterSelections: ThinktankRosterModels;
 		callbacks: ThinktankRoomCallbacks;
 	}) {
 		this.services = options.services;
+		this.deps = options.deps;
 		this.cwd = options.cwd;
 		this.callbacks = options.callbacks;
 		this.roomSessionDir = createRoomSessionDir(options.cwd);
@@ -451,6 +439,9 @@ export class ThinktankRoomRuntime {
 						: undefined,
 				]),
 			),
+			// Inject the deps clamp so roster.ts doesn't import pi-ai value imports.
+			(model, level) =>
+				this.deps.clampThinkingLevel(model, level ?? "high") as ThinkingLevel,
 		);
 
 		for (const definition of THINKTANK_LAB_DEFINITIONS) {
@@ -462,10 +453,10 @@ export class ThinktankRoomRuntime {
 
 			const sessionDir = join(this.roomSessionDir, "labs", definition.id);
 			mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
-			const sessionManager = SessionManager.continueRecent(this.cwd, sessionDir);
-			const created = await createAgentSessionFromServices({
-				services: this.services as AgentSessionServices,
-				sessionManager,
+			const created = await this.deps.createLabSession({
+				cwd: this.cwd,
+				sessionDir,
+				services: this.services,
 				model,
 				thinkingLevel,
 				tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
@@ -771,8 +762,8 @@ export class ThinktankRoomRuntime {
 			throw new Error(auth.error);
 		}
 		const model = agent.model as Model<Api>;
-		const reasoning = clampThinkingLevel(model, "low");
-		const message = await completeSimple(
+		const reasoning = this.deps.clampThinkingLevel(model, "low");
+		const message = await this.deps.completeSimple(
 			model,
 			{
 				systemPrompt,
