@@ -1,6 +1,6 @@
 # Thinktank Extension Improvement Plan
 
-**Status:** v1.1 — Iteration round 1 (converged)
+**Status:** v1.2 — Implementation plan converged; ready to execute
 **Date:** 2026-05-26
 **Authors:** GPT-5.5 (`github-copilot/gpt-5.5:xhigh`), Anthropic Claude Opus 4.7 1M Internal (`github-copilot/claude-opus-4.7-1m-internal:xhigh`)
 **Method:** In-room Socratic debate without human participant, per user instruction
@@ -89,11 +89,12 @@ The ordering is intentional: **trust → governed autonomy → maintainability**
 
 **Tasks:**
 
-- New transcript event: `{ type: "agent_error", agent, provider, model, thinkingLevel, errorSummary, errorRaw }`.
+- New transcript event: `{ type: "agent_error", agent, provider, model, thinkingLevel, errorSummary, errorRaw, category }`.
+- Classify common failure categories: `unsupported_thinking_level`, `auth`, `context_overflow`, `provider_error`, `unknown`.
 - New TUI rendering for `agent_error` (red badge, agent name, one-line summary, expandable details).
 - `promptAgentWithOverflowRecovery` catches all errors (not just context overflow), emits `agent_error`, then decides per `policy.onAgentError` whether to continue, ask, or halt.
 - Distinguish four agent states explicitly in the public transcript: `spoke`, `passed`, `errored`, `interrupted`.
-- Bonus: detect the specific `thinking.type.enabled` 400 error and either (a) auto-downgrade thinking level and retry once, or (b) surface a targeted suggestion — see Open Question 3.
+- **Decision (v1.2):** do not silently auto-downgrade unsupported thinking levels. Surface a visible, classified, targeted error first. Add explicit retry/remediation later (for example, a roster quick-fix or `/thinktank retry-agent anthropic --thinking off`).
 
 **Acceptance:** Replaying the actual 16:26:13Z transcript event from `transcript.jsonl` (where Anthropic 4.7 1M internal silently failed) would produce a visible `agent_error` event for the Anthropic lab, not a silent skip. The user would not need to ask "why didn't you respond."
 
@@ -112,6 +113,37 @@ The ordering is intentional: **trust → governed autonomy → maintainability**
 - Don't change event semantics or transcript format.
 
 **Acceptance:** Phase 1's `agent_error` events still flow correctly. Tool-call correlation works under a synthetic test with 100 concurrent tool calls. No transcript format change.
+
+### Phase 1.75 — Turn-continuation policy (shipped 2026-05-26)
+
+**Goal:** prevent collaborative rooms from going idle immediately after opening turns.
+
+**Status:** shipped in `8a5306b` (`fix room stalling: invert impulse default, honor opening handoffs, force continuation in collaboration mode`). This phase landed before Phase 0 because the stall blocked the very process producing this plan.
+
+**Failure mode:** rooms appeared to run `GPT-5.5 → Anthropic → stop`, even when the prompt explicitly asked both agents to debate, save, and iterate. This is distinct from Phase 1's agent-error problem: both agents could speak successfully, but the scheduler still stopped too early.
+
+**Causes identified:**
+
+1. The impulse prompt's old "pass unless useful" default was miscalibrated for high-turn collaborative rooms.
+2. `chooseNextTurn` is structurally fragile in the two-agent case: after Anthropic speaks, only GPT is eligible; if GPT privately passes, the room stops.
+3. `turnNeedsRoomResponse` was only applied inside the dynamic loop, not after opening turns.
+4. The English regex missed common handoff/action phrases like "your write", "back to GPT", and "after you save".
+5. Hidden impulse decisions were not logged, so private pass/malformed/error decisions looked identical from the public transcript.
+6. Collaboration-style prompts had no minimum dynamic exchange floor.
+
+**Shipped fixes:**
+
+- Inverted the impulse prompt default: agents now default to speaking unless they would merely restate prior turns.
+- Expanded `turnNeedsRoomResponse` with `assignsNextActionOrHandsOff` patterns.
+- Added `isCollaborationPrompt(...)` detection.
+- Added `minDynamicExchanges = agents.length * 2` for collaborative prompts.
+- Seeded forced responses from opening-turn handoffs.
+- Added forced continuation when the chooser returns idle before required response/minimum exchange conditions are satisfied.
+- Added `turn_impulse_poll`, `collaboration_mode`, and `forced_continuation` transcript events.
+
+**Caveat:** this is a stop-gap, not the final governance model. The regex expansion makes current rooms behave better, but Phase 3's structured `writeIntent` field remains the correct long-term replacement for regex-driven write/handoff detection.
+
+**Acceptance:** a collaborative prompt emits `collaboration_mode`, logs `turn_impulse_poll` during dynamic turns, and continues past the old `GPT-5.5 → Anthropic → stop` pattern.
 
 ### Phase 2 — Artifact collaboration as a proven pattern (not yet a runtime mode)
 
@@ -214,13 +246,16 @@ Every state transition is a transcript event.
   - Hard `maxRuntimeMs` enforcement; on exceed, emit a `room_halt` event and stop accepting new turns.
   - Optional `maxTokensPerPrompt` if/when the SDK exposes a cumulative-per-prompt counter.
 
-**Tasks (Phase 5b, deferred):**
+**Tasks (Phase 5b):**
 
-- User-facing commands:
+- **Decision (v1.2):** ship minimal policy commands with the policy type. A policy type without commands is developer-complete but user-hostile.
+- Minimum user-facing commands:
   - `/thinktank policy` (show current)
-  - `/thinktank turns <n>`
-  - `/thinktank writes prompt|consensus|autonomous`
-  - `/thinktank memory ephemeral|persistent|artifact`
+  - `/thinktank policy set maxTurns <n>`
+  - `/thinktank policy set maxRuntimeMs <ms>`
+  - `/thinktank policy reset`
+- Defer richer UI/overlay controls and specialized shorthands such as `/thinktank writes prompt|consensus|autonomous` and `/thinktank memory ephemeral|persistent|artifact` until the minimal command path has proven useful.
+- Policy-setting commands mutate user configuration under `~/.ai-thinktank/settings.json`, not project files. They should not be governed by the future Phase 3 write-intent gate.
 
 **Acceptance:** No critical loop behavior is hardcoded; defaults reproduce today's behavior exactly so this is a non-breaking change. `maxRuntimeMs` triggers in a synthetic test room.
 
@@ -255,6 +290,19 @@ These are real issues we identified, but they're either lower-leverage or upstre
 - **Image re-grounding per turn.** `agentsThatReceivedHumanImages` (line 299) marks images as delivered after the first turn per agent. Real issue but affects only image-heavy rooms.
 - **`recordPublicAction` O(N) tool-call/end correlation.** Harmless at 10 turns, less so at 1000. Optimize after Phase 0 makes the change easy to test.
 - **Synchronous `appendFileSync` on the hot path** for every tool start/end. Same logic — defer until refactor.
+- **Pi extension dev-loop friction.** Pi loads installed git extensions from a separate checkout under `~/.pi/agent/git/...`, not from the developer repo. After every extension change, the actual loop is: edit dev repo → commit + push → `pi update <source>` → `/reload` in Pi. Forgetting either update/reload makes a fix look broken even when the repository is correct. Mitigations belong upstream in Pi (for example: `pi dev <local-path>`, an "installed extension behind remote" startup warning, or auto-reload on install-dir source changes), but the footgun is recorded here so future sessions do not lose the same debugging cycle.
+
+## 5.5 Execution sequence
+
+1. **README footgun note for `SessionManager.continueRecent`.** Cheapest user-visible fix; can ship before or alongside Phase 0.
+2. **Phase 0 — validation seam.** Establish `node:test` coverage for the pure helpers and error/event formatting.
+3. **Phase 1 — visible agent failures.** Add classified `agent_error` transcript/UI handling.
+4. **Phase 1.5 — runtime hygiene.** Keep the `recordPublicAction` and transcript-write cleanup near Phase 1 but scoped separately.
+5. **Phase 5 — policy type, cost/wall-clock guardrails, and minimal policy commands.** Make runtime behavior explicit and user-configurable.
+6. **Phase 4 — interruption wiring.** Can proceed in parallel with Phase 3 once the validation seam exists.
+7. **Phase 3 — write governance.** Largest scope; depends on structured `writeIntent` rather than regex handoff detection.
+8. **Phase 6 — memory controls.** Add status/clear/mode commands after policy infrastructure exists.
+9. **Phase 2b — formal artifact workflow.** Promote only after the documented trigger fires: at least three emergent plan artifacts with at least one in-room revision each.
 
 ## 6. Iteration log
 
@@ -281,17 +329,24 @@ These are real issues we identified, but they're either lower-leverage or upstre
   - **New Phase 1.5:** runtime hygiene bucket for `recordPublicAction` O(N) walk and `appendFileSync` on the hot path. Kept out of Phase 0/1 to bound blast radius.
   Saved via targeted edits to `docs/thinktank-improvement-plan.md`. Room declared converged.
 
-- **v1.2 — (next iteration round, to be filled by the room):**
+- **v1.2 — 2026-05-26 (this session, iteration round 2):**
+  The room closed the final two open questions and incorporated the scheduler fix that reality forced ahead of the planned Phase 0:
+  - **Open Question 3:** no silent thinking-level downgrade. Phase 1 should surface classified, targeted `agent_error` messages; explicit retry/remediation can come later.
+  - **Open Question 4:** minimal policy commands ship with the policy type; richer UI/overlay commands are deferred.
+  - **New Phase 1.75:** documented the already-shipped turn-continuation policy fix (`8a5306b`) that prevents collaborative rooms from stalling after opening turns.
+  - **Execution sequence:** added a concrete implementation order so the plan is actionable.
+  - **Out-of-plan footgun:** recorded Pi's dev-repo vs install-dir update/reload trap after it caused a false negative test of `8a5306b`.
+  Status updated to "Implementation plan converged; ready to execute."
 
-## 7. Open questions for the next iteration round
+## 7. Resolved questions
 
 1. ~~**Phase 0 test framework choice.**~~ **Resolved in v1.1:** `node:test`.
 
 2. ~~**Phase 3 write-governance strictness.**~~ **Resolved in v1.1:** authorization is keyed on `intentId` and is granted by default if the peer response does not contain an objection marker or a counter-intent. Counter-proposals are first-class new intents with distinct IDs. The scope is path-bounded (edit/write) or command-prefix-bounded (bash) and expires after one turn.
 
-3. **Phase 1 graceful-downgrade behavior** for unsupported thinking levels. Should the runtime auto-retry with a downgraded level on detection of the `thinking.type.enabled` 400, or surface the error and require the user to fix it in `/roster`? Auto-retry is friendlier in the short term but obscures the real provider-config bug we'd otherwise be forced to fix upstream.
+3. ~~**Phase 1 graceful-downgrade behavior.**~~ **Resolved in v1.2:** do not silently auto-downgrade unsupported thinking levels. Surface a visible, classified, targeted error and add explicit retry/remediation later.
 
-4. **Phase 5b timing.** Ship policy *commands* at the same time as the policy *type*, or stay deferred? Without commands, the only way to change a policy field is hand-editing `~/.ai-thinktank/settings.json`. Power-user-friendly, everyone-else-hostile.
+4. ~~**Phase 5b timing.**~~ **Resolved in v1.2:** ship minimal policy commands with the policy type. Defer richer UI/overlay controls.
 
 ---
 
