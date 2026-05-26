@@ -457,8 +457,38 @@ export class ThinktankRoomRuntime {
 	}
 
 	private recordAgentSessionEvent(agent: LabAgentRuntime, event: AgentSessionEvent): void {
+		this.recordActiveTurnProgress(agent, event);
 		this.recordPublicAction(agent, event);
 		this.recordCompactionEvent(agent, event);
+	}
+
+	private recordActiveTurnProgress(agent: LabAgentRuntime, event: AgentSessionEvent): void {
+		if (!this.activeTurn || this.activeTurn.agent !== agent) {
+			return;
+		}
+
+		if (event.type === "message_update" && event.message.role === "assistant") {
+			const text = getTextFromMessage(event.message);
+			if (text) {
+				this.activeTurn.partialText = text;
+			}
+			return;
+		}
+
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			const text = getTextFromMessage(event.message);
+			if (text) {
+				this.activeTurn.partialText = text;
+			}
+			return;
+		}
+
+		if (event.type === "tool_execution_end") {
+			this.activeTurn.toolCallsCompleted++;
+			if (event.isError) {
+				this.activeTurn.toolErrors++;
+			}
+		}
 	}
 
 	private recordCompactionEvent(agent: LabAgentRuntime, event: AgentSessionEvent): void {
@@ -568,6 +598,32 @@ export class ThinktankRoomRuntime {
 			encoding: "utf8",
 			mode: 0o600,
 		});
+	}
+
+	private recordInterruptedTurn(agent: LabAgentRuntime, phase: AgentTurnPhase, result: Extract<AgentTurnResult, { status: "interrupted" }>): string {
+		const partialText = result.text.trim();
+		const interrupter = typeof result.interrupter === "string" ? result.interrupter : result.interrupter.visibleName;
+		const text = [
+			"Interrupted before completion.",
+			`Reason: ${result.reason}`,
+			`Interrupted by: ${interrupter}`,
+			"",
+			"Partial visible output:",
+			partialText || "(No visible output captured before interruption.)",
+		].join("\n");
+
+		this.transcript.push({ speaker: agent.visibleName, text });
+		this.appendRoomEvent({
+			type: "agent_interrupted",
+			phase,
+			agent: agent.visibleName,
+			provider: agent.model.provider,
+			model: agent.model.id,
+			interrupter,
+			reason: result.reason,
+			partialText,
+		});
+		return text;
 	}
 
 	private recordAgentTurnError(
@@ -1172,20 +1228,26 @@ Decide if you need to interrupt them immediately.`;
 				this.callbacks.onAgentTurnStart?.(getAgentInfo(agent));
 				let finalText = "";
 				let turnErrored = false;
+				let turnInterrupted = false;
 				try {
-					await this.promptAgentWithOverflowRecovery(
+					const result = await this.promptAgentWithInterrupts(
 						agent,
 						this.buildPromptForAgent(agent, next.kind, "opening"),
 						this.getImagesForAgentPrompt(agent),
 					);
-					finalText = getLastAssistantText(agent.session);
+					if (result.status === "interrupted") {
+						turnInterrupted = true;
+						finalText = this.recordInterruptedTurn(agent, "opening", result);
+					} else {
+						finalText = result.text;
+					}
 				} catch (error) {
 					turnErrored = true;
 					finalText = getLastAssistantText(agent.session);
 					this.recordAgentTurnError(agent, "opening", error, finalText);
 					// TODO(phase-5): consult policy.onAgentError. Default is continue.
 				}
-				if (!turnErrored && finalText) {
+				if (!turnErrored && !turnInterrupted && finalText) {
 					this.transcript.push({ speaker: agent.visibleName, text: finalText });
 					this.appendRoomEvent({
 						type: "agent_turn",
@@ -1284,20 +1346,26 @@ Decide if you need to interrupt them immediately.`;
 				this.callbacks.onAgentTurnStart?.(getAgentInfo(agent));
 				let finalText = "";
 				let turnErrored = false;
+				let turnInterrupted = false;
 				try {
-					await this.promptAgentWithOverflowRecovery(
+					const result = await this.promptAgentWithInterrupts(
 						agent,
 						this.buildPromptForAgent(agent, kind, phase),
 						this.getImagesForAgentPrompt(agent),
 					);
-					finalText = getLastAssistantText(agent.session);
+					if (result.status === "interrupted") {
+						turnInterrupted = true;
+						finalText = this.recordInterruptedTurn(agent, phase, result);
+					} else {
+						finalText = result.text;
+					}
 				} catch (error) {
 					turnErrored = true;
 					finalText = getLastAssistantText(agent.session);
 					this.recordAgentTurnError(agent, phase, error, finalText);
 					// TODO(phase-5): consult policy.onAgentError. Default is continue.
 				}
-				if (!turnErrored && finalText) {
+				if (!turnErrored && !turnInterrupted && finalText) {
 					this.transcript.push({ speaker: agent.visibleName, text: finalText });
 					this.appendRoomEvent({
 						type: "agent_turn",

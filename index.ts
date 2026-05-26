@@ -726,6 +726,29 @@ export default function (pi: ExtensionAPI) {
 					transcriptFile: room?.transcriptFile,
 				});
 			},
+			onInterrupt(
+				interruptedAgent: ThinktankRoomAgentInfo,
+				interrupter: ThinktankRoomAgentInfo | "user" | "runtime",
+				reason: string,
+			): void {
+				const interrupterName = typeof interrupter === "string" ? interrupter : interrupter.visibleName;
+				const text = `${interruptedAgent.visibleName} was interrupted by ${interrupterName}.\n\nReason: ${reason}`;
+				ctx.ui.setStatus("thinktank-active", `${interruptedAgent.visibleName} interrupted`);
+				updateLiveState({
+					visible: true,
+					status: `${interruptedAgent.visibleName} interrupted`,
+					agent: interruptedAgent,
+					text,
+					thinking: "",
+					toolCalls: [],
+				});
+				send({
+					kind: "status",
+					title: `${interruptedAgent.visibleName} interrupted`,
+					text,
+					transcriptFile: room?.transcriptFile,
+				});
+			},
 			onAgentEvent(agent: ThinktankRoomAgentInfo, _session: unknown, event: AgentSessionEvent): void {
 				handleAgentEvent(agent, event);
 			},
