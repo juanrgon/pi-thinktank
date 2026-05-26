@@ -27,6 +27,7 @@ jobs:
         # imported by tests (they pull in @earendil-works/pi-* peer deps),
         # so check them directly so the workflow catches obvious breakage.
         run: |
+          node --experimental-strip-types --check agent-failure-policy.ts
           node --experimental-strip-types --check interruption.ts
           node --experimental-strip-types --check transcript-text.ts
           node --experimental-strip-types --check turn-impulse.ts

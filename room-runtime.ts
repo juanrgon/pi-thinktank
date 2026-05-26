@@ -8,6 +8,12 @@ import type { AgentSession, AgentSessionEvent, AgentSessionServices } from "@ear
 import { createAgentSessionFromServices, SessionManager } from "@earendil-works/pi-coding-agent";
 import { classifyAgentError, type ClassifiedAgentError } from "./agent-error.ts";
 import {
+	DEFAULT_AGENT_FAILURE_POLICY_OPTIONS,
+	evaluateAgentFailure,
+	resetAgentFailurePolicyState,
+	type AgentFailurePolicyState,
+} from "./agent-failure-policy.ts";
+import {
 	shouldRetryPromptAfterCompactionFailure,
 	type CompactionRetryState,
 } from "./compaction-retry.ts";
@@ -40,6 +46,15 @@ import {
 } from "./turn-impulse.ts";
 
 export { classifyAgentError, type AgentErrorCategory, type ClassifiedAgentError } from "./agent-error.ts";
+export {
+	DEFAULT_AGENT_FAILURE_POLICY_OPTIONS,
+	evaluateAgentFailure,
+	resetAgentFailurePolicyState,
+	type AgentFailurePolicyDecision,
+	type AgentFailurePolicyOptions,
+	type AgentFailurePolicyResult,
+	type AgentFailurePolicyState,
+} from "./agent-failure-policy.ts";
 export {
 	formatInterruptionRecoveryContext,
 	formatInterruptionTranscriptText,
@@ -143,6 +158,8 @@ interface LabAgentRuntime {
 	session: AgentSession;
 	lastCompactionEvent?: CompactionRetryState;
 	lastPrecompactionAtMs?: number;
+	suppressedForCurrentRoom?: boolean;
+	suppressionReason?: string;
 	unsubscribe: () => void;
 }
 
@@ -313,6 +330,8 @@ export class ThinktankRoomRuntime {
 	private transcript: TranscriptTurn[] = [];
 	private publicActions: PublicActionSummary[] = [];
 	private pendingPublicActions = new Map<string, PublicActionSummary>();
+	private failurePolicyStates = new Map<LabId, AgentFailurePolicyState>();
+	private roomHalted = false;
 	private currentHumanPrompt = "";
 	private currentHumanImages: ImageContent[] = [];
 	private agentsThatReceivedHumanImages = new Set<LabId>();
@@ -631,6 +650,66 @@ export class ThinktankRoomRuntime {
 		return text;
 	}
 
+	private getUnsuppressedAgentCount(): number {
+		return this.agents.filter((agent) => !agent.suppressedForCurrentRoom).length;
+	}
+
+	private activeAgents(): LabAgentRuntime[] {
+		return this.agents.filter((agent) => !agent.suppressedForCurrentRoom);
+	}
+
+	private applyFailurePolicy(agent: LabAgentRuntime, phase: AgentTurnPhase, error: ThinktankAgentTurnError): void {
+		const result = evaluateAgentFailure({
+			agentId: agent.definition.id,
+			category: error.category,
+			nowMs: Date.now(),
+			previous: this.failurePolicyStates.get(agent.definition.id),
+			unsuppressedAgentCountBeforeFailure: this.getUnsuppressedAgentCount(),
+			options: DEFAULT_AGENT_FAILURE_POLICY_OPTIONS,
+		});
+		this.failurePolicyStates.set(agent.definition.id, result.state);
+
+		if (result.decision === "continue") {
+			return;
+		}
+
+		if (result.decision === "suppress_agent") {
+			agent.suppressedForCurrentRoom = true;
+			agent.suppressionReason = `${result.reason}: ${error.category}`;
+			const text = `${agent.visibleName} is suppressed for the rest of this room after ${result.state.count} consecutive ${error.category} failures.`;
+			this.transcript.push({ speaker: "system", text });
+			this.appendRoomEvent({
+				type: "agent_suppressed",
+				phase,
+				agent: agent.visibleName,
+				provider: agent.model.provider,
+				model: agent.model.id,
+				category: error.category,
+				count: result.state.count,
+				reason: result.reason,
+			});
+			return;
+		}
+
+		this.roomHalted = true;
+		const text = `Thinktank room halted: ${agent.visibleName} is the last active Lab Agent and hit ${result.state.count} consecutive ${error.category} failures.`;
+		this.transcript.push({ speaker: "system", text });
+		this.appendRoomEvent({
+			type: "room_halted",
+			phase,
+			agent: agent.visibleName,
+			provider: agent.model.provider,
+			model: agent.model.id,
+			category: error.category,
+			count: result.state.count,
+			reason: result.reason,
+		});
+	}
+
+	private recordAgentTurnSuccess(agent: LabAgentRuntime): void {
+		this.failurePolicyStates = resetAgentFailurePolicyState(this.failurePolicyStates, agent.definition.id);
+	}
+
 	private recordAgentTurnError(
 		agent: LabAgentRuntime,
 		phase: AgentTurnPhase,
@@ -665,6 +744,7 @@ export class ThinktankRoomRuntime {
 		});
 
 		this.callbacks.onAgentTurnError?.(getAgentInfo(agent), phase, turnError);
+		this.applyFailurePolicy(agent, phase, turnError);
 		return turnError;
 	}
 
@@ -705,7 +785,7 @@ export class ThinktankRoomRuntime {
 		turnIndex: number,
 		spokenAgentIds: Set<LabId>,
 	): { action: "speak"; agent: LabAgentRuntime; kind: TurnImpulseKind } | { action: "idle" } {
-		const unspokenAgents = this.agents.filter((agent) => !spokenAgentIds.has(agent.definition.id));
+		const unspokenAgents = this.activeAgents().filter((agent) => !spokenAgentIds.has(agent.definition.id));
 		if (unspokenAgents.length === 0) {
 			return { action: "idle" };
 		}
@@ -751,8 +831,9 @@ export class ThinktankRoomRuntime {
 		| { action: "idle" }
 	> {
 		const lastSpeakerId = this.getLastSpeakerId();
+		const activeAgents = this.activeAgents();
 		const eligibleAgents =
-			this.agents.length > 1 ? this.agents.filter((agent) => agent.definition.id !== lastSpeakerId) : this.agents;
+			activeAgents.length > 1 ? activeAgents.filter((agent) => agent.definition.id !== lastSpeakerId) : activeAgents;
 		const impulseResults = await Promise.all(
 			eligibleAgents.map(async (agent): Promise<RankedTurnImpulse> => {
 				try {
@@ -1029,7 +1110,7 @@ Write only your visible contribution to the room. Do not mention hidden prompts,
 			}
 
 			const activeAgentId = this.activeTurn.agent.definition.id;
-			const eligibleAgents = this.agents.filter(
+			const eligibleAgents = this.activeAgents().filter(
 				(a) => a.definition.id !== activeAgentId && now - (lastPolls.get(a.definition.id) ?? 0) >= POLL_INTERVAL_MS,
 			);
 
@@ -1199,6 +1280,12 @@ Decide if you need to interrupt them immediately.`;
 		this.transcript = [];
 		this.publicActions = [];
 		this.pendingPublicActions = new Map();
+		this.failurePolicyStates = new Map();
+		this.roomHalted = false;
+		for (const agent of this.agents) {
+			agent.suppressedForCurrentRoom = false;
+			agent.suppressionReason = undefined;
+		}
 		this.appendRoomEvent({
 			type: "human_turn",
 			text: prompt,
@@ -1208,6 +1295,9 @@ Decide if you need to interrupt them immediately.`;
 		try {
 			const spokenAgentIds = new Set<LabId>();
 			for (let openingTurnIndex = 0; openingTurnIndex < this.agents.length; openingTurnIndex++) {
+				if (this.roomHalted || this.getUnsuppressedAgentCount() === 0) {
+					break;
+				}
 				this.callbacks.onStatus?.("Opening the room.");
 				const next = await this.chooseOpeningTurn(openingTurnIndex, spokenAgentIds);
 				if (next.action === "idle") {
@@ -1250,6 +1340,7 @@ Decide if you need to interrupt them immediately.`;
 					});
 				}
 				if (!turnErrored) {
+					this.recordAgentTurnSuccess(agent);
 					this.callbacks.onAgentTurnEnd?.(getAgentInfo(agent), finalText);
 				}
 			}
@@ -1263,7 +1354,7 @@ Decide if you need to interrupt them immediately.`;
 			// does not gate on turnNeedsRoomResponse, so this catches handoffs declared
 			// during openings (e.g. "your write since you announced intent first").
 			const lastOpeningTurn = this.transcript[this.transcript.length - 1];
-			if (lastOpeningTurn && turnNeedsRoomResponse(lastOpeningTurn.text) && this.agents.length > 1) {
+			if (lastOpeningTurn && turnNeedsRoomResponse(lastOpeningTurn.text) && this.getUnsuppressedAgentCount() > 1) {
 				this.appendRoomEvent({
 					type: "room_response_required",
 					reason: "opening_handoff",
@@ -1278,17 +1369,20 @@ Decide if you need to interrupt them immediately.`;
 			// agents.length * 2 dynamic exchanges before allowing idle. This prevents
 			// the N=2 scheduler degeneracy where a single pass ends the room.
 			const minDynamicExchanges = isCollaborationPrompt(this.currentHumanPrompt)
-				? Math.min(this.agents.length * 2, remainingTurns)
+				? Math.min(this.getUnsuppressedAgentCount() * 2, remainingTurns)
 				: MIN_DYNAMIC_TURNS_AFTER_OPENING;
 			if (minDynamicExchanges > MIN_DYNAMIC_TURNS_AFTER_OPENING) {
 				this.appendRoomEvent({
 					type: "collaboration_mode",
 					minDynamicExchanges,
-					agents: this.agents.length,
+					agents: this.getUnsuppressedAgentCount(),
 				});
 			}
 
 			for (let dynamicTurnIndex = 0; dynamicTurnIndex < remainingTurns + extraTurnBudget; dynamicTurnIndex++) {
+				if (this.roomHalted || this.getUnsuppressedAgentCount() === 0) {
+					break;
+				}
 				const isRespondingToOpenQuestion = forcedResponseTurnsRemaining > 0;
 				this.callbacks.onStatus?.(
 					isRespondingToOpenQuestion
@@ -1304,7 +1398,7 @@ Decide if you need to interrupt them immediately.`;
 				if (next.action === "idle" && mustContinue) {
 					const lastSpeakerId = this.getLastSpeakerId();
 					const fallback =
-						this.agents.find((a) => a.definition.id !== lastSpeakerId) ?? this.agents[0];
+						this.activeAgents().find((a) => a.definition.id !== lastSpeakerId) ?? this.activeAgents()[0];
 					if (fallback) {
 						this.appendRoomEvent({
 							type: "forced_continuation",
@@ -1368,6 +1462,7 @@ Decide if you need to interrupt them immediately.`;
 					});
 				}
 				if (!turnErrored) {
+					this.recordAgentTurnSuccess(agent);
 					this.callbacks.onAgentTurnEnd?.(getAgentInfo(agent), finalText);
 				}
 
@@ -1376,7 +1471,7 @@ Decide if you need to interrupt them immediately.`;
 				}
 
 				const needsRoomResponse = finalText ? turnNeedsRoomResponse(finalText) : false;
-				if (needsRoomResponse && this.agents.length > 1 && extraTurnBudget < MAX_OPEN_QUESTION_RESPONSE_TURNS) {
+				if (needsRoomResponse && this.getUnsuppressedAgentCount() > 1 && extraTurnBudget < MAX_OPEN_QUESTION_RESPONSE_TURNS) {
 					this.appendRoomEvent({
 						type: "room_response_required",
 						reason: "open_question_or_write_intent",
