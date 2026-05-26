@@ -1,10 +1,10 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, AssistantMessage, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, completeSimple, isContextOverflow } from "@earendil-works/pi-ai";
-import type { AgentSession, AgentSessionEvent, AgentSessionServices } from "@earendil-works/pi-coding-agent";
+import type { AgentSessionServices } from "@earendil-works/pi-coding-agent";
 import { createAgentSessionFromServices, SessionManager } from "@earendil-works/pi-coding-agent";
 import { classifyAgentError, type ClassifiedAgentError } from "./agent-error.ts";
 import {
@@ -31,6 +31,13 @@ import {
 	type ThinktankLabDefinition,
 	type ThinktankRosterModels,
 } from "./roster.ts";
+import type {
+	ThinktankAgentMessageLike,
+	ThinktankModelLike,
+	ThinktankSessionEventLike,
+	ThinktankSessionLike,
+	ThinktankServicesLike,
+} from "./runtime-deps.ts";
 import {
 	formatInterruptionRecoveryContext,
 	formatInterruptionTranscriptText,
@@ -108,7 +115,11 @@ export interface ThinktankRoomCallbacks {
 	onAgentTurnStart?(agent: ThinktankRoomAgentInfo): void;
 	onAgentTurnEnd?(agent: ThinktankRoomAgentInfo, text: string): void;
 	onAgentTurnError?(agent: ThinktankRoomAgentInfo, phase: AgentTurnPhase, error: ThinktankAgentTurnError): void;
-	onAgentEvent?(agent: ThinktankRoomAgentInfo, session: AgentSession, event: AgentSessionEvent): void | Promise<void>;
+	onAgentEvent?(
+		agent: ThinktankRoomAgentInfo,
+		session: ThinktankSessionLike,
+		event: ThinktankSessionEventLike,
+	): void | Promise<void>;
 	onInterrupt?(
 		interruptedAgent: ThinktankRoomAgentInfo,
 		interrupter: ThinktankRoomAgentInfo | "user" | "runtime",
@@ -152,10 +163,10 @@ interface PublicActionSummary {
 
 interface LabAgentRuntime {
 	definition: ThinktankLabDefinition;
-	model: Model<Api>;
+	model: ThinktankModelLike;
 	thinkingLevel: ThinkingLevel;
 	visibleName: string;
-	session: AgentSession;
+	session: ThinktankSessionLike;
 	lastCompactionEvent?: CompactionRetryState;
 	lastPrecompactionAtMs?: number;
 	suppressedForCurrentRoom?: boolean;
@@ -251,7 +262,7 @@ function getAgentInfo(agent: LabAgentRuntime): ThinktankRoomAgentInfo {
 	};
 }
 
-function getTextFromMessage(message: AgentMessage): string {
+function getTextFromMessage(message: ThinktankAgentMessageLike): string {
 	if (message.role !== "assistant" && message.role !== "user") {
 		return "";
 	}
@@ -262,13 +273,13 @@ function getTextFromMessage(message: AgentMessage): string {
 	}
 
 	return content
-		.filter((part): part is TextContent => part.type === "text")
-		.map((part) => part.text)
+		.filter((part) => part.type === "text" && typeof part.text === "string")
+		.map((part) => part.text ?? "")
 		.join("")
 		.trim();
 }
 
-function getLastAssistantText(session: AgentSession): string {
+function getLastAssistantText(session: ThinktankSessionLike): string {
 	for (let i = session.messages.length - 1; i >= 0; i--) {
 		const message = session.messages[i];
 		if (message?.role === "assistant") {
@@ -278,7 +289,7 @@ function getLastAssistantText(session: AgentSession): string {
 	return "";
 }
 
-export function isContextOverflowException(error: unknown, model: Model<Api>): boolean {
+export function isContextOverflowException(error: unknown, model: ThinktankModelLike): boolean {
 	const errorMessage = error instanceof Error ? error.message : String(error);
 	const message = {
 		role: "assistant",
@@ -298,7 +309,7 @@ export function isContextOverflowException(error: unknown, model: Model<Api>): b
 		errorMessage,
 		timestamp: Date.now(),
 	} as AssistantMessage;
-	return isContextOverflow(message, model.contextWindow);
+	return isContextOverflow(message, model.contextWindow ?? 0);
 }
 
 function transcriptText(turns: TranscriptTurn[], options?: { limit?: number }): string {
@@ -321,7 +332,7 @@ function actionSummaryText(actions: PublicActionSummary[]): string {
 
 
 export class ThinktankRoomRuntime {
-	private services: AgentSessionServices;
+	private services: ThinktankServicesLike;
 	private cwd: string;
 	private roomSessionDir: string;
 	private callbacks: ThinktankRoomCallbacks;
@@ -345,7 +356,7 @@ export class ThinktankRoomRuntime {
 	private lastInterruption?: InterruptionContext;
 
 	constructor(options: {
-		services: AgentSessionServices;
+		services: ThinktankServicesLike;
 		cwd: string;
 		rosterSelections: ThinktankRosterModels;
 		callbacks: ThinktankRoomCallbacks;
@@ -424,7 +435,7 @@ export class ThinktankRoomRuntime {
 		this.agents = [];
 
 		this.services.modelRegistry.refresh();
-		const availableModels = this.services.modelRegistry.getAvailable();
+		const availableModels = this.services.modelRegistry.getAvailable() as Model<Api>[];
 		const selectedRoster = selectDefaultThinktankRosterModels(
 			availableModels,
 			Object.fromEntries(
@@ -453,7 +464,7 @@ export class ThinktankRoomRuntime {
 			mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
 			const sessionManager = SessionManager.continueRecent(this.cwd, sessionDir);
 			const created = await createAgentSessionFromServices({
-				services: this.services,
+				services: this.services as AgentSessionServices,
 				sessionManager,
 				model,
 				thinkingLevel,
@@ -465,7 +476,7 @@ export class ThinktankRoomRuntime {
 				model,
 				thinkingLevel,
 				visibleName: getThinktankVisibleName(definition, model),
-				session: created.session,
+				session: created.session as ThinktankSessionLike,
 				unsubscribe: () => {},
 			};
 			labAgent.unsubscribe = created.session.subscribe((event) => {
@@ -480,13 +491,13 @@ export class ThinktankRoomRuntime {
 		return `${agent.definition.id}:${toolCallId}`;
 	}
 
-	private recordAgentSessionEvent(agent: LabAgentRuntime, event: AgentSessionEvent): void {
+	private recordAgentSessionEvent(agent: LabAgentRuntime, event: ThinktankSessionEventLike): void {
 		this.recordActiveTurnProgress(agent, event);
 		this.recordPublicAction(agent, event);
 		this.recordCompactionEvent(agent, event);
 	}
 
-	private recordActiveTurnProgress(agent: LabAgentRuntime, event: AgentSessionEvent): void {
+	private recordActiveTurnProgress(agent: LabAgentRuntime, event: ThinktankSessionEventLike): void {
 		if (!this.activeTurn || this.activeTurn.agent !== agent) {
 			return;
 		}
@@ -515,7 +526,7 @@ export class ThinktankRoomRuntime {
 		}
 	}
 
-	private recordCompactionEvent(agent: LabAgentRuntime, event: AgentSessionEvent): void {
+	private recordCompactionEvent(agent: LabAgentRuntime, event: ThinktankSessionEventLike): void {
 		if (event.type === "compaction_start") {
 			agent.lastCompactionEvent = {
 				reason: event.reason,
@@ -535,13 +546,15 @@ export class ThinktankRoomRuntime {
 			return;
 		}
 
+		const firstKeptEntryId =
+			event.result?.firstKeptEntryId === undefined ? undefined : String(event.result.firstKeptEntryId);
 		const state: CompactionRetryState = {
 			reason: event.reason,
 			willRetry: event.willRetry,
 			aborted: event.aborted,
 			errorMessage: event.errorMessage,
 			tokensBefore: event.result?.tokensBefore,
-			firstKeptEntryId: event.result?.firstKeptEntryId,
+			firstKeptEntryId,
 			timestampMs: Date.now(),
 		};
 		agent.lastCompactionEvent = state;
@@ -555,11 +568,11 @@ export class ThinktankRoomRuntime {
 			willRetry: event.willRetry,
 			error: event.errorMessage,
 			tokensBefore: event.result?.tokensBefore,
-			firstKeptEntryId: event.result?.firstKeptEntryId,
+			firstKeptEntryId,
 		});
 	}
 
-	private recordPublicAction(agent: LabAgentRuntime, event: AgentSessionEvent): void {
+	private recordPublicAction(agent: LabAgentRuntime, event: ThinktankSessionEventLike): void {
 		if (event.type === "tool_execution_start") {
 			this.appendRoomEvent({
 				type: "tool_start",
@@ -757,9 +770,10 @@ export class ThinktankRoomRuntime {
 		if (!auth.ok) {
 			throw new Error(auth.error);
 		}
-		const reasoning = clampThinkingLevel(agent.model, "low");
+		const model = agent.model as Model<Api>;
+		const reasoning = clampThinkingLevel(model, "low");
 		const message = await completeSimple(
-			agent.model,
+			model,
 			{
 				systemPrompt,
 				messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
@@ -844,7 +858,7 @@ export class ThinktankRoomRuntime {
 ${this.currentHumanPrompt}
 
 Your identity:
-${agent.definition.shortName}: ${agent.visibleName} (${getThinktankModelReference(agent.model)})
+${agent.definition.shortName}: ${agent.visibleName} (${getThinktankModelReference(agent.model as Model<Api>)})
 
 Turn number:
 ${turnIndex + 1}
@@ -927,7 +941,7 @@ Decide whether the room should continue. Take the floor when the latest turn cha
 		const roster = this.agents
 			.map(
 				(candidate) =>
-					`${candidate.definition.shortName}: ${candidate.visibleName} (${getThinktankModelReference(candidate.model)}:${candidate.thinkingLevel})`,
+					`${candidate.definition.shortName}: ${candidate.visibleName} (${getThinktankModelReference(candidate.model as Model<Api>)}:${candidate.thinkingLevel})`,
 			)
 			.join("\n");
 		const isFirstTurn = this.transcript.length === 0;
@@ -950,7 +964,7 @@ Decide whether the room should continue. Take the floor when the latest turn cha
 
 		return `You are the ${agent.definition.shortName} Lab Agent in a shared AI Thinktank room.
 Your visible name is ${agent.visibleName}.
-Your model provenance is ${getThinktankModelReference(agent.model)}.
+Your model provenance is ${getThinktankModelReference(agent.model as Model<Api>)}.
 
 Human participant prompt:
 

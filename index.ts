@@ -4,7 +4,6 @@ import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai";
 import {
-	type AgentSessionEvent,
 	type AgentSessionServices,
 	createAgentSessionServices,
 	type ExtensionAPI,
@@ -31,6 +30,7 @@ import {
 	type ThinktankRoster,
 } from "./roster.ts";
 import { RosterSelectorComponent } from "./roster-selector.ts";
+import type { ThinktankSessionEventLike } from "./runtime-deps.ts";
 
 const MESSAGE_TYPE = "thinktank-room";
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
@@ -588,7 +588,7 @@ export default function (pi: ExtensionAPI) {
 		updateRosterStatus(ctx);
 	}
 
-	function handleAgentEvent(agent: ThinktankRoomAgentInfo, event: AgentSessionEvent): void {
+	function handleAgentEvent(agent: ThinktankRoomAgentInfo, event: ThinktankSessionEventLike): void {
 		if (event.type === "message_update" && event.message.role === "assistant") {
 			updateLiveState({
 				visible: true,
@@ -749,7 +749,7 @@ export default function (pi: ExtensionAPI) {
 					transcriptFile: room?.transcriptFile,
 				});
 			},
-			onAgentEvent(agent: ThinktankRoomAgentInfo, _session: unknown, event: AgentSessionEvent): void {
+			onAgentEvent(agent: ThinktankRoomAgentInfo, _session: unknown, event: ThinktankSessionEventLike): void {
 				handleAgentEvent(agent, event);
 			},
 			onRoomIdle(): void {
