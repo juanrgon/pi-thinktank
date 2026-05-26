@@ -1,5 +1,7 @@
 export {
 	classifyAgentError,
+	decidePrecompaction,
+	DEFAULT_PRECOMPACTION_THRESHOLD_RATIO,
 	isAssistantContinuationAfterCompactionError,
 	shouldRetryPromptAfterCompactionFailure,
 	ThinktankRoomRuntime,
@@ -8,6 +10,10 @@ export {
 	type AgentTurnResult,
 	type ClassifiedAgentError,
 	type CompactionRetryState,
+	type ContextUsageSnapshot,
+	type PrecompactionDecision,
+	type PrecompactionDecisionReason,
+	type PrecompactionSettings,
 	type ThinktankAgentTurnError,
 	type ThinktankRoomAgentInfo,
 	type ThinktankRoomCallbacks,

@@ -12,6 +12,10 @@ import {
 	type CompactionRetryState,
 } from "./compaction-retry.ts";
 import {
+	decidePrecompaction,
+	DEFAULT_PRECOMPACTION_THRESHOLD_RATIO,
+} from "./precompaction.ts";
+import {
 	getThinktankModelReference,
 	getThinktankVisibleName,
 	type LabId,
@@ -34,6 +38,14 @@ export {
 	shouldRetryPromptAfterCompactionFailure,
 	type CompactionRetryState,
 } from "./compaction-retry.ts";
+export {
+	decidePrecompaction,
+	DEFAULT_PRECOMPACTION_THRESHOLD_RATIO,
+	type ContextUsageSnapshot,
+	type PrecompactionDecision,
+	type PrecompactionDecisionReason,
+	type PrecompactionSettings,
+} from "./precompaction.ts";
 export {
 	isCollaborationPrompt,
 	parseTurnImpulse,
@@ -123,8 +135,12 @@ const MAX_ROOM_TURNS = 1000;
 const MIN_DYNAMIC_TURNS_AFTER_OPENING = 0;
 const MAX_POST_COMPACTION_PROMPT_RETRIES = 1;
 const MAX_OPEN_QUESTION_RESPONSE_TURNS = 1000;
+const THINKTANK_PRECOMPACTION_THRESHOLD_RATIO = DEFAULT_PRECOMPACTION_THRESHOLD_RATIO;
 const READ_WRITE_TOOL_WARNING = `Tool use is public in this room. Reads, searches, and bash exploration may proceed.
 Before edits, writes, or destructive shell commands, state the intended change in the public conversation and wait for the room to converge.`;
+
+const THINKTANK_PRECOMPACTION_INSTRUCTIONS =
+	"Summarize this Lab Agent's private Thinktank room-session context before it takes another turn. Preserve the human's goals, the room's current task, prior Lab Agent conclusions, public tool actions, important files or commands, and unresolved decisions. Keep the summary compact enough for several more Thinktank turns.";
 
 const INTERRUPT_DECISION_SYSTEM_PROMPT = `You are a Lab Agent observing another Lab Agent's in-progress turn in a shared room.
 Decide only whether to interrupt the active speaker right now.
@@ -976,11 +992,47 @@ Decide if you need to interrupt them immediately.`;
 			}
 		}
 	}
+	private async compactAgentIfNeeded(agent: LabAgentRuntime): Promise<void> {
+		const usage = agent.session.getContextUsage();
+		const settings = this.services.settingsManager.getCompactionSettings();
+		const decision = decidePrecompaction(usage, settings, THINKTANK_PRECOMPACTION_THRESHOLD_RATIO);
+		if (!decision.shouldCompact) {
+			return;
+		}
+
+		this.callbacks.onStatus?.(`${agent.visibleName} is compacting private context before taking the floor.`);
+		this.appendRoomEvent({
+			type: "precompaction_requested",
+			agent: agent.visibleName,
+			provider: agent.model.provider,
+			model: agent.model.id,
+			decision,
+			usage,
+			settings,
+		});
+
+		try {
+			await agent.session.compact(THINKTANK_PRECOMPACTION_INSTRUCTIONS);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.appendRoomEvent({
+				type: "precompaction_failed",
+				agent: agent.visibleName,
+				provider: agent.model.provider,
+				model: agent.model.id,
+				error: message,
+				decision,
+			});
+			this.callbacks.onStatus?.(`${agent.visibleName} pre-turn compaction failed; continuing with Pi's automatic fallback.`);
+		}
+	}
+
 	private async promptAgentWithOverflowRecovery(
 		agent: LabAgentRuntime,
 		prompt: string,
 		images?: ImageContent[],
 	): Promise<void> {
+		await this.compactAgentIfNeeded(agent);
 		for (let attempt = 0; attempt <= MAX_POST_COMPACTION_PROMPT_RETRIES; attempt++) {
 			agent.lastCompactionEvent = undefined;
 			try {
