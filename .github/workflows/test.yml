@@ -27,6 +27,7 @@ jobs:
         run: |
           node --experimental-strip-types --check turn-impulse.ts
           node --experimental-strip-types --check agent-error.ts
+          node --experimental-strip-types --check compaction-retry.ts
           node --experimental-strip-types --check room-runtime.ts
           node --experimental-strip-types --check index.ts
           node --experimental-strip-types --check roster.ts

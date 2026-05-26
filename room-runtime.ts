@@ -8,6 +8,10 @@ import type { AgentSession, AgentSessionEvent, AgentSessionServices } from "@ear
 import { createAgentSessionFromServices, SessionManager } from "@earendil-works/pi-coding-agent";
 import { classifyAgentError, type ClassifiedAgentError } from "./agent-error.ts";
 import {
+	shouldRetryPromptAfterCompactionFailure,
+	type CompactionRetryState,
+} from "./compaction-retry.ts";
+import {
 	getThinktankModelReference,
 	getThinktankVisibleName,
 	type LabId,
@@ -25,6 +29,11 @@ import {
 } from "./turn-impulse.ts";
 
 export { classifyAgentError, type AgentErrorCategory, type ClassifiedAgentError } from "./agent-error.ts";
+export {
+	isAssistantContinuationAfterCompactionError,
+	shouldRetryPromptAfterCompactionFailure,
+	type CompactionRetryState,
+} from "./compaction-retry.ts";
 export {
 	isCollaborationPrompt,
 	parseTurnImpulse,
@@ -106,12 +115,13 @@ interface LabAgentRuntime {
 	thinkingLevel: ThinkingLevel;
 	visibleName: string;
 	session: AgentSession;
+	lastCompactionEvent?: CompactionRetryState;
 	unsubscribe: () => void;
 }
 
 const MAX_ROOM_TURNS = 1000;
 const MIN_DYNAMIC_TURNS_AFTER_OPENING = 0;
-const MAX_CONTEXT_OVERFLOW_RETRIES = 1;
+const MAX_POST_COMPACTION_PROMPT_RETRIES = 1;
 const MAX_OPEN_QUESTION_RESPONSE_TURNS = 1000;
 const READ_WRITE_TOOL_WARNING = `Tool use is public in this room. Reads, searches, and bash exploration may proceed.
 Before edits, writes, or destructive shell commands, state the intended change in the public conversation and wait for the room to converge.`;
@@ -367,7 +377,7 @@ export class ThinktankRoomRuntime {
 				unsubscribe: () => {},
 			};
 			labAgent.unsubscribe = created.session.subscribe((event) => {
-				this.recordPublicAction(labAgent, event);
+				this.recordAgentSessionEvent(labAgent, event);
 				void this.callbacks.onAgentEvent?.(getAgentInfo(labAgent), created.session, event);
 			});
 			this.agents.push(labAgent);
@@ -376,6 +386,55 @@ export class ThinktankRoomRuntime {
 
 	private getPublicActionKey(agent: LabAgentRuntime, toolCallId: string): string {
 		return `${agent.definition.id}:${toolCallId}`;
+	}
+
+	private recordAgentSessionEvent(agent: LabAgentRuntime, event: AgentSessionEvent): void {
+		this.recordPublicAction(agent, event);
+		this.recordCompactionEvent(agent, event);
+	}
+
+	private recordCompactionEvent(agent: LabAgentRuntime, event: AgentSessionEvent): void {
+		if (event.type === "compaction_start") {
+			agent.lastCompactionEvent = {
+				reason: event.reason,
+				timestampMs: Date.now(),
+			};
+			this.appendRoomEvent({
+				type: "compaction_start",
+				reason: event.reason,
+				agent: agent.visibleName,
+				provider: agent.model.provider,
+				model: agent.model.id,
+			});
+			return;
+		}
+
+		if (event.type !== "compaction_end") {
+			return;
+		}
+
+		const state: CompactionRetryState = {
+			reason: event.reason,
+			willRetry: event.willRetry,
+			aborted: event.aborted,
+			errorMessage: event.errorMessage,
+			tokensBefore: event.result?.tokensBefore,
+			firstKeptEntryId: event.result?.firstKeptEntryId,
+			timestampMs: Date.now(),
+		};
+		agent.lastCompactionEvent = state;
+		this.appendRoomEvent({
+			type: "compaction_end",
+			reason: event.reason,
+			agent: agent.visibleName,
+			provider: agent.model.provider,
+			model: agent.model.id,
+			aborted: event.aborted,
+			willRetry: event.willRetry,
+			error: event.errorMessage,
+			tokensBefore: event.result?.tokensBefore,
+			firstKeptEntryId: event.result?.firstKeptEntryId,
+		});
 	}
 
 	private recordPublicAction(agent: LabAgentRuntime, event: AgentSessionEvent): void {
@@ -922,7 +981,8 @@ Decide if you need to interrupt them immediately.`;
 		prompt: string,
 		images?: ImageContent[],
 	): Promise<void> {
-		for (let attempt = 0; attempt <= MAX_CONTEXT_OVERFLOW_RETRIES; attempt++) {
+		for (let attempt = 0; attempt <= MAX_POST_COMPACTION_PROMPT_RETRIES; attempt++) {
+			agent.lastCompactionEvent = undefined;
 			try {
 				await agent.session.prompt(prompt, {
 					expandPromptTemplates: false,
@@ -931,45 +991,32 @@ Decide if you need to interrupt them immediately.`;
 				});
 				return;
 			} catch (error) {
-				const canRecover = attempt < MAX_CONTEXT_OVERFLOW_RETRIES && isContextOverflowException(error, agent.model);
-				if (!canRecover) {
-					throw error;
-				}
-
-				this.callbacks.onStatus?.(`${agent.visibleName} hit the context limit. Compacting and retrying.`);
-				this.appendRoomEvent({
-					type: "compaction_start",
-					reason: "overflow",
-					agent: agent.visibleName,
-					provider: agent.model.provider,
-					model: agent.model.id,
-				});
-
-				try {
-					const result = await agent.session.compact(
-						"Summarize this Lab Agent's private room-session context so it can continue the shared AI Thinktank discussion. Preserve the human's goals, prior Lab Agent conclusions, public tool actions, important files or commands, and any unresolved decisions. Keep the summary compact enough to avoid another context overflow.",
+				if (
+					shouldRetryPromptAfterCompactionFailure(
+						error,
+						agent.lastCompactionEvent,
+						attempt,
+						MAX_POST_COMPACTION_PROMPT_RETRIES,
+					)
+				) {
+					const message = error instanceof Error ? error.message : String(error);
+					this.callbacks.onStatus?.(
+						`${agent.visibleName} compacted but Pi could not continue from the compacted context. Retrying as a new prompt.`,
 					);
 					this.appendRoomEvent({
-						type: "compaction_end",
-						reason: "overflow",
+						type: "compaction_prompt_retry",
+						reason: "assistant_terminal_continuation",
 						agent: agent.visibleName,
 						provider: agent.model.provider,
 						model: agent.model.id,
-						tokensBefore: result.tokensBefore,
-						firstKeptEntryId: result.firstKeptEntryId,
-					});
-				} catch (compactionError) {
-					const message = compactionError instanceof Error ? compactionError.message : String(compactionError);
-					this.appendRoomEvent({
-						type: "compaction_end",
-						reason: "overflow",
-						agent: agent.visibleName,
-						provider: agent.model.provider,
-						model: agent.model.id,
+						attempt: attempt + 1,
+						maxAttempts: MAX_POST_COMPACTION_PROMPT_RETRIES,
 						error: message,
+						compaction: agent.lastCompactionEvent,
 					});
-					throw new Error(`${agent.visibleName} hit the context limit, and compaction failed: ${message}`);
+					continue;
 				}
+				throw error;
 			}
 		}
 	}

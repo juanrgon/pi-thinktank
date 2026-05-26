@@ -605,6 +605,23 @@ export default function (pi: ExtensionAPI) {
 				text: `Compacting private context because of ${event.reason}.`,
 				transcriptFile: room?.transcriptFile,
 			});
+			return;
+		}
+
+		if (event.type === "compaction_end") {
+			const text = event.errorMessage
+				? `Compaction failed: ${event.errorMessage}`
+				: event.aborted
+					? "Compaction aborted."
+					: event.result
+						? `Compaction completed. Tokens before: ${event.result.tokensBefore}. ${event.willRetry ? "Pi will retry the turn." : ""}`
+						: "Compaction ended without a result.";
+			send({
+				kind: event.errorMessage ? "error" : "status",
+				title: `${agent.visibleName} compaction ${event.errorMessage ? "failed" : "finished"}`,
+				text,
+				transcriptFile: room?.transcriptFile,
+			});
 		}
 	}
 

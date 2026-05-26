@@ -1,10 +1,13 @@
 export {
 	classifyAgentError,
+	isAssistantContinuationAfterCompactionError,
+	shouldRetryPromptAfterCompactionFailure,
 	ThinktankRoomRuntime,
 	type AgentErrorCategory,
 	type AgentTurnPhase,
 	type AgentTurnResult,
 	type ClassifiedAgentError,
+	type CompactionRetryState,
 	type ThinktankAgentTurnError,
 	type ThinktankRoomAgentInfo,
 	type ThinktankRoomCallbacks,
