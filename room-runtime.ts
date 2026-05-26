@@ -121,8 +121,9 @@ If you interrupt, your reason must name the concrete failure mode and the next c
 const TURN_IMPULSE_SYSTEM_PROMPT = `You are a Lab Agent's private conversational impulse in an AI Thinktank CLI.
 
 You just heard the latest visible turn. Decide whether you want to take the floor next.
-Most thoughts are not worth saying. Pass unless your contribution would clearly improve the conversation now.
-Speak when you have a useful addition, correction, challenge, clarification, synthesis, or final answer.
+Default to speaking. Pass only if you would clearly only restate prior turns or have nothing new to add.
+Speak when you have a useful addition, correction, challenge, clarification, synthesis, response to an open question, response to a handoff or action assignment, or final answer.
+If the latest visible turn assigns the next action to you, hands the floor to you, asks for your approval, proposes a write you should respond to, or otherwise expects another agent to act, you must speak.
 You are not allowed to speak if you were the Lab Agent who spoke most recently.
 
 Return exactly one JSON object and no prose:
@@ -282,7 +283,27 @@ function turnNeedsRoomResponse(text: string): boolean {
 			normalized,
 		);
 
-	return asksRoomForCoordination || endsWithCoordinationQuestion || proposesImmediateWrite;
+	const assignsNextActionOrHandsOff =
+		/\byour (write|turn|move|response|call|update|edit|save|critique|reply)\b/.test(normalized) ||
+		/\b(gpt|claude|anthropic|openai|gemini|google)[^.!?\n]{0,60}\b(should|will|please|needs? to|must)\s+(write|edit|update|save|create|respond|confirm|reply|do|add|fix|patch|address|review|critique|push back|weigh in|take|incorporate|fold|draft)\b/.test(normalized) ||
+		/\b(over to|handing (this|the floor|over)( back)?( to)?|back to)\s+(you|gpt|claude|anthropic|openai|gemini|google)\b/.test(normalized) ||
+		/\bafter you (save|write|edit|finish|respond|reply|incorporate|update)\b/.test(normalized) ||
+		/\b(next,?\s+|then,?\s+)?(gpt|claude|anthropic|openai|gemini|google|you)\s+(should|will|please|needs? to|must)\s+(write|edit|update|save|create|respond|do|incorporate|fold|address)\b/.test(normalized) ||
+		/\byour (write|update|edit|save|response|critique)\s+(since|because|now|next|first)\b/.test(normalized);
+
+	return (
+		asksRoomForCoordination ||
+		endsWithCoordinationQuestion ||
+		proposesImmediateWrite ||
+		assignsNextActionOrHandsOff
+	);
+}
+
+function isCollaborationPrompt(humanPrompt: string): boolean {
+	const p = humanPrompt.toLowerCase();
+	return /\b(both|together|debate|back\s*and\s*forth|iterate|until complete|until done|socrat(ic|es)|without me|amongst yoursel(f|ves)|with each other|each of you)\b/.test(
+		p,
+	);
 }
 
 export class ThinktankRoomRuntime {
@@ -596,10 +617,13 @@ ${actionSummaryText(this.publicActions)}
 
 Decide whether the room should continue. Take the floor when the latest turn challenges, corrects, extends, or questions your position, or when a useful synthesis would move the conversation forward. Pass if you would mostly restate prior turns, if the latest turn is only asking the human for missing context, or if the exchange is complete.`,
 					);
-					return {
-						agent,
-						impulse: parseTurnImpulse(raw) ?? { action: "pass", kind: "none", urgency: 0 },
+					const impulse = parseTurnImpulse(raw) ?? {
+						action: "pass" as const,
+						kind: "none" as const,
+						urgency: 0,
+						reason: `Malformed impulse JSON: ${raw.trim().slice(0, 240)}`,
 					};
+					return { agent, impulse };
 				} catch (error) {
 					return {
 						agent,
@@ -617,6 +641,29 @@ Decide whether the room should continue. Take the floor when the latest turn cha
 		const strongest = impulseResults
 			.filter((entry) => entry.impulse.action === "speak" || entry.impulse.action === "finish")
 			.sort((a, b) => b.impulse.urgency - a.impulse.urgency)[0];
+
+		this.appendRoomEvent({
+			type: "turn_impulse_poll",
+			turnIndex,
+			lastSpeaker: lastSpeakerId,
+			impulses: impulseResults.map((r) => ({
+				agent: r.agent.visibleName,
+				provider: r.agent.model.provider,
+				model: r.agent.model.id,
+				action: r.impulse.action,
+				kind: r.impulse.kind,
+				urgency: r.impulse.urgency,
+				reason: r.impulse.reason,
+			})),
+			decision: strongest
+				? {
+						agent: strongest.agent.visibleName,
+						action: strongest.impulse.action,
+						kind: strongest.impulse.kind,
+						urgency: strongest.impulse.urgency,
+					}
+				: { action: "idle" },
+		});
 
 		if (!strongest) {
 			return { action: "idle" };
@@ -1012,6 +1059,37 @@ Decide if you need to interrupt them immediately.`;
 			const remainingTurns = Math.max(0, MAX_ROOM_TURNS - this.transcript.length);
 			let extraTurnBudget = 0;
 			let forcedResponseTurnsRemaining = 0;
+
+			// If the last opening turn handed the floor off or proposed a write, seed a
+			// forced response so the opening handoff is honored. The opening loop itself
+			// does not gate on turnNeedsRoomResponse, so this catches handoffs declared
+			// during openings (e.g. "your write since you announced intent first").
+			const lastOpeningTurn = this.transcript[this.transcript.length - 1];
+			if (lastOpeningTurn && turnNeedsRoomResponse(lastOpeningTurn.text) && this.agents.length > 1) {
+				this.appendRoomEvent({
+					type: "room_response_required",
+					reason: "opening_handoff",
+					agent: lastOpeningTurn.speaker,
+				});
+				forcedResponseTurnsRemaining = 1;
+				extraTurnBudget++;
+			}
+
+			// Collaboration-style prompts ("both", "together", "debate", "iterate",
+			// "until complete", "Socratic", "without me", etc.) require at least
+			// agents.length * 2 dynamic exchanges before allowing idle. This prevents
+			// the N=2 scheduler degeneracy where a single pass ends the room.
+			const minDynamicExchanges = isCollaborationPrompt(this.currentHumanPrompt)
+				? Math.min(this.agents.length * 2, remainingTurns)
+				: MIN_DYNAMIC_TURNS_AFTER_OPENING;
+			if (minDynamicExchanges > MIN_DYNAMIC_TURNS_AFTER_OPENING) {
+				this.appendRoomEvent({
+					type: "collaboration_mode",
+					minDynamicExchanges,
+					agents: this.agents.length,
+				});
+			}
+
 			for (let dynamicTurnIndex = 0; dynamicTurnIndex < remainingTurns + extraTurnBudget; dynamicTurnIndex++) {
 				const isRespondingToOpenQuestion = forcedResponseTurnsRemaining > 0;
 				this.callbacks.onStatus?.(
@@ -1019,12 +1097,37 @@ Decide if you need to interrupt them immediately.`;
 						? "Waiting for the room to answer the open question."
 						: "Listening for who wants the floor.",
 				);
-				const next = await this.chooseNextTurn(this.transcript.length);
+				let next = await this.chooseNextTurn(this.transcript.length);
+
+				// If the chooser returns idle while a response is required or before the
+				// collaboration minimum has been met, force-pick the non-last-speaker so
+				// the room keeps moving instead of silently stopping.
+				const mustContinue = isRespondingToOpenQuestion || dynamicTurnIndex < minDynamicExchanges;
+				if (next.action === "idle" && mustContinue) {
+					const lastSpeakerId = this.getLastSpeakerId();
+					const fallback =
+						this.agents.find((a) => a.definition.id !== lastSpeakerId) ?? this.agents[0];
+					if (fallback) {
+						this.appendRoomEvent({
+							type: "forced_continuation",
+							reason: isRespondingToOpenQuestion
+								? "response_required_after_handoff"
+								: "below_minimum_collaboration_exchanges",
+							minDynamicExchanges,
+							dynamicTurnIndex,
+							agent: fallback.visibleName,
+							provider: fallback.model.provider,
+							model: fallback.model.id,
+						});
+						next = { action: "speak" as const, agent: fallback, kind: "add" as const };
+					}
+				}
+
 				if (next.action === "idle") {
 					break;
 				}
 				const agent = next.agent;
-				const canClose = !isRespondingToOpenQuestion && dynamicTurnIndex >= MIN_DYNAMIC_TURNS_AFTER_OPENING;
+				const canClose = !isRespondingToOpenQuestion && dynamicTurnIndex >= minDynamicExchanges;
 				const requestedKind = next.action === "finish" ? "final" : next.kind;
 				const kind = isRespondingToOpenQuestion
 					? "synthesize"
