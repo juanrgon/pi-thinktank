@@ -10,6 +10,7 @@
 //       via ready(), verify the injected createLabSession was called with
 //       the model selected by the roster logic.
 
+import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -169,6 +170,80 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		assert.equal(openaiErrors.length, 2, "expected exactly two openai errors");
 		assert.equal(openaiErrors[0]?.category, "provider_error");
 		assert.equal(openaiErrors[1]?.category, "provider_error");
+
+		room.dispose();
+	});
+
+	test("collaboration prompts force continuation even when impulse polls pass", async () => {
+		const services = new FakeServices({
+			models: [
+				createFakeModel({
+					provider: "github-copilot",
+					id: "gpt-5.5",
+					name: "GPT-5.5",
+				}),
+				createFakeModel({
+					provider: "anthropic",
+					id: "claude-opus-4.7",
+					name: "Claude Opus 4.7",
+				}),
+			],
+		});
+		const deps = new FakeRuntimeDeps();
+		const endedTurns: string[] = [];
+
+		const room = new ThinktankRoomRuntime({
+			services,
+			deps,
+			cwd: `/tmp/thinktank-f4-force-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			rosterSelections: {},
+			callbacks: {
+				onAgentTurnEnd: (agent, text) => endedTurns.push(`${agent.id}:${text}`),
+			},
+		});
+		await room.ready();
+
+		const openaiIdx = deps.createLabSessionCalls.findIndex((c) => c.model.provider === "github-copilot");
+		const anthropicIdx = deps.createLabSessionCalls.findIndex((c) => c.model.provider === "anthropic");
+		assert.ok(openaiIdx >= 0 && anthropicIdx >= 0, "both labs should have session-create calls");
+		const openaiSession = deps.createdSessions[openaiIdx];
+		const anthropicSession = deps.createdSessions[anthropicIdx];
+		assert.ok(openaiSession && anthropicSession);
+
+		openaiSession.queuePromptMessage("openai opening");
+		openaiSession.queuePromptMessage("openai forced 1");
+		openaiSession.queuePromptMessage("openai forced 2");
+		anthropicSession.queuePromptMessage("anthropic opening");
+		anthropicSession.queuePromptMessage("anthropic forced 1");
+		anthropicSession.queuePromptMessage("anthropic forced 2");
+
+		// FakeRuntimeDeps.completeSimple defaults to malformed impulse JSON ("{}"),
+		// so every hidden impulse poll passes. The collaboration prompt should
+		// still force four dynamic turns after the two opening turns.
+		await room.submitHumanPrompt("please iterate together without me");
+
+		assert.deepEqual(endedTurns, [
+			"openai:openai opening",
+			"anthropic:anthropic opening",
+			"openai:openai forced 1",
+			"anthropic:anthropic forced 1",
+			"openai:openai forced 2",
+			"anthropic:anthropic forced 2",
+		]);
+		assert.equal(openaiSession.promptCalls.length, 3);
+		assert.equal(anthropicSession.promptCalls.length, 3);
+
+		const roomEvents = readFileSync(room.transcriptFile, "utf8")
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line) as { type?: string; reason?: string });
+		const forcedContinuations = roomEvents.filter((event) => event.type === "forced_continuation");
+		assert.equal(forcedContinuations.length, 4, "expected one forced continuation per required dynamic turn");
+		assert.ok(
+			forcedContinuations.every((event) => event.reason === "below_minimum_collaboration_exchanges"),
+			"forced continuations should be due to collaboration minimum",
+		);
 
 		room.dispose();
 	});
