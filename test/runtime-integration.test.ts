@@ -359,6 +359,65 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		room.dispose();
 	});
 
+	test("post-compaction assistant-continuation failure retries the same prompt once", async () => {
+		const services = new FakeServices({
+			models: [
+				createFakeModel({
+					provider: "github-copilot",
+					id: "gpt-5.5",
+					name: "GPT-5.5",
+				}),
+			],
+		});
+		const deps = new FakeRuntimeDeps();
+		const endedTurns: string[] = [];
+		const turnErrors: string[] = [];
+
+		const room = new ThinktankRoomRuntime({
+			services,
+			deps,
+			cwd: `/tmp/thinktank-f4-compaction-retry-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			rosterSelections: {},
+			callbacks: {
+				onAgentTurnEnd: (agent, text) => endedTurns.push(`${agent.id}:${text}`),
+				onAgentTurnError: (agent, _phase, error) => turnErrors.push(`${agent.id}:${error.category}`),
+			},
+		});
+		await room.ready();
+
+		const session = deps.createdSessions[0];
+		assert.ok(session, "runtime should have created exactly one fake session");
+		session.queuePromptScript({
+			kind: "error",
+			error: new Error("Cannot continue from message role: assistant"),
+			events: [{ type: "compaction_end", reason: "overflow", willRetry: true }],
+		});
+		session.queuePromptMessage("retry succeeded after compaction");
+
+		await room.submitHumanPrompt("simple prompt that should recover from compaction retry");
+
+		assert.equal(session.promptCalls.length, 2, "runtime should retry the visible prompt exactly once");
+		assert.equal(
+			session.promptCalls[0]?.prompt,
+			session.promptCalls[1]?.prompt,
+			"retry should re-use the same visible prompt text",
+		);
+		assert.deepEqual(endedTurns, ["openai:retry succeeded after compaction"]);
+		assert.deepEqual(turnErrors, [], "recovered compaction retry should not surface as an agent turn error");
+
+		const roomEvents = readFileSync(room.transcriptFile, "utf8")
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line) as { type?: string; reason?: string; attempt?: number });
+		const retryEvents = roomEvents.filter((event) => event.type === "compaction_prompt_retry");
+		assert.equal(retryEvents.length, 1, "expected exactly one compaction prompt retry event");
+		assert.equal(retryEvents[0]?.reason, "assistant_terminal_continuation");
+		assert.equal(retryEvents[0]?.attempt, 1);
+
+		room.dispose();
+	});
+
 	test("submitHumanPrompt drives an opening turn on the only enabled agent", async () => {
 		const services = new FakeServices({
 			models: [
