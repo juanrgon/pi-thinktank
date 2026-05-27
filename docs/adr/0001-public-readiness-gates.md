@@ -4,6 +4,13 @@
 
 Proposed
 
+> **Update (2026-05-27):** The persistent private lab-session memory referenced
+> in this ADR (resuming each agent's most recent session per cwd) is superseded by
+> [ADR 0004](0004-ephemeral-lab-memory-default.md). Lab memory is now **ephemeral
+> by default** (no auto-resume); `labMemory: "persistent"` is opt-in. The threat
+> framing below ("stale private context") still holds and is what ADR 0004
+> addresses.
+
 ## Date
 
 2026-05-27
@@ -78,6 +85,8 @@ Public preview requires:
 4. **Memory transparency baseline**
    - Docs explain persistent private lab sessions and shared transcripts.
    - There is a documented way to inspect and reset persisted room state.
+   - (Superseded by [ADR 0004](0004-ephemeral-lab-memory-default.md): private
+     lab memory is now ephemeral by default rather than persistent.)
 
 5. **Operational guardrail baseline**
    - The extension has documented stop/reset commands.
@@ -136,7 +145,7 @@ This ADR does not define a semver policy, release process, or package-distributi
 
 This ADR does not require Thinktank to defend against malicious users or adversarial model behavior in v1.0.
 
-**Session resume is a v1.0 non-goal.** Rooms in v1.0 are single-sitting: closing the terminal or losing the process ends the room, and there is no `/thinktank resume` command. Lab sessions persist (each agent's private memory survives), but the shared room transcript is not re-instantiable from disk. Adding resume requires either re-hydrating each Lab Agent's runtime session from its on-disk lab session directory at room startup, or replaying the JSONL transcript with correctness guarantees we do not have today. Both are real architectural work, and v1.0 ships honestly without them by documenting rooms as single-sitting. A later ADR can revisit this once a clear resume contract is needed.
+**Session resume is a v1.0 non-goal.** Rooms in v1.0 are single-sitting: closing the terminal or losing the process ends the room, and there is no `/thinktank resume` command. Lab sessions are ephemeral by default (per [ADR 0004](0004-ephemeral-lab-memory-default.md)), so each agent's private memory does not survive across runs unless `labMemory: "persistent"` is set; the shared room transcript is not re-instantiable from disk. Adding resume requires either re-hydrating each Lab Agent's runtime session from its on-disk lab session directory at room startup, or replaying the JSONL transcript with correctness guarantees we do not have today. Both are real architectural work, and v1.0 ships honestly without them by documenting rooms as single-sitting. A later ADR can revisit this once a clear resume contract is needed.
 
 ## Reversal cost
 
