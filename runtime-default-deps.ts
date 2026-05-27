@@ -59,8 +59,21 @@ export const defaultRuntimeDeps: ThinktankRuntimeDeps = {
 			model: options.model as any,
 			// biome-ignore lint/suspicious/noExplicitAny: adapter boundary cast
 			thinkingLevel: options.thinkingLevel as any,
-			tools: [...options.tools],
+			// When an explicit allowlist is given, restrict to it (the SDK activates
+			// exactly those). Otherwise omit the allowlist so all built-in +
+			// extension/MCP tools are registered, then activate the full set
+			// (minus excludeTools) below.
+			...(options.tools ? { tools: [...options.tools] } : {}),
 		});
-		return { session: created.session as ThinktankSessionLike };
+		const session = created.session;
+		if (!options.tools) {
+			const exclude = new Set(options.excludeTools ?? []);
+			const activeNames = session
+				.getAllTools()
+				.map((tool) => tool.name)
+				.filter((name) => !exclude.has(name));
+			session.setActiveToolsByName(activeNames);
+		}
+		return { session: session as ThinktankSessionLike };
 	},
 };

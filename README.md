@@ -34,6 +34,14 @@ Turn on the Thinktank:
 
 Type a prompt. The models will take turns discussing the prompt, with tool use visible in the shared transcript.
 
+## Lab agent tools
+
+By default each lab agent gets the built-in coding tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) **plus** every installed extension/MCP tool (for example web/code search and page fetch), so agents can research and use the same capabilities you have.
+
+The one exception is the **interactive desktop-control tools** (`screen_capture`, mouse/keyboard, `type_text`, `press_keys`, etc.). These drive your physical machine and are excluded by default so autonomous in-room agents can't take over your desktop.
+
+Note: write safety is still prompt-based — `edit`, `write`, and `bash` are available and gated only by in-room etiquette, not runtime policy. See [`docs/adr/0003-lab-agent-tool-access.md`](docs/adr/0003-lab-agent-tool-access.md) for the full policy and the `labTools` option (`"all"` for full parity including desktop control, or an explicit allowlist to restrict).
+
 ## Memory and persistence
 
 The room transcript is saved to `~/.ai-thinktank/room-sessions/<sanitized-cwd>/transcript.jsonl` and persists across Pi runs.

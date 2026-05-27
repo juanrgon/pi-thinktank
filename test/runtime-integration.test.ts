@@ -67,9 +67,23 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		assert.ok(call, "createLabSession call recorded");
 		assert.equal(call.model.id, "gpt-5.5");
 		assert.equal(call.model.provider, "github-copilot");
+		// Default lab tool policy: no explicit allowlist (all built-in + extension
+		// tools available), excluding the interactive desktop-control tools.
+		assert.equal(call.tools, undefined);
 		assert.deepEqual(
-			[...call.tools],
-			["read", "bash", "edit", "write", "grep", "find", "ls"],
+			[...(call.excludeTools ?? [])],
+			[
+				"screen_capture",
+				"mouse_position",
+				"mouse_move",
+				"mouse_click",
+				"mouse_double_click",
+				"mouse_right_click",
+				"type_text",
+				"press_keys",
+				"wait",
+				"frontmost_app",
+			],
 		);
 
 		// 3. The fake session created by deps.createLabSession should be
@@ -572,6 +586,38 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		assert.equal(deps.createLabSessionCalls[0]?.model.provider, "github-copilot");
 
 		room.dispose();
+	});
+
+	test("labTools controls the lab session tool policy passed to createLabSession", async () => {
+		const capture = async (labTools?: readonly string[] | "all") => {
+			const services = new FakeServices({
+				models: [createFakeModel({ provider: "github-copilot", id: "gpt-5.5" })],
+			});
+			const deps = new FakeRuntimeDeps();
+			const room = new ThinktankRoomRuntime({
+				services,
+				deps,
+				cwd: `/tmp/thinktank-labtools-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+				rosterSelections: {},
+				labTools,
+				callbacks: {},
+			});
+			await room.ready();
+			const call = deps.createLabSessionCalls[0];
+			room.dispose();
+			assert.ok(call);
+			return call;
+		};
+
+		// Explicit allowlist passes straight through as `tools`.
+		const explicit = await capture(["read", "web_search"]);
+		assert.deepEqual([...(explicit.tools ?? [])], ["read", "web_search"]);
+		assert.equal(explicit.excludeTools, undefined);
+
+		// "all" means no allowlist and no exclusions (full parity, incl. desktop).
+		const all = await capture("all");
+		assert.equal(all.tools, undefined);
+		assert.deepEqual([...(all.excludeTools ?? [])], []);
 	});
 
 	test("a non-throwing provider error (stopReason=error) is surfaced, not silently swallowed", async () => {

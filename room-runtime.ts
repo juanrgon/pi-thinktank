@@ -190,6 +190,22 @@ export interface ThinktankLabSessionInfo {
 const MAX_ROOM_TURNS = 1000;
 const DEFAULT_MAX_ROUNDS = 8;
 const MAX_POST_COMPACTION_PROMPT_RETRIES = 1;
+// Interactive desktop-control tools excluded from lab agents by default: they
+// drive the human participant's physical machine (mouse, keyboard, screen) and
+// must not be wielded autonomously by in-room agents. Pass labTools: "all" to
+// include them, or an explicit allowlist to choose exactly what is enabled.
+const THINKTANK_INTERACTIVE_DESKTOP_TOOLS = [
+	"screen_capture",
+	"mouse_position",
+	"mouse_move",
+	"mouse_click",
+	"mouse_double_click",
+	"mouse_right_click",
+	"type_text",
+	"press_keys",
+	"wait",
+	"frontmost_app",
+] as const;
 const THINKTANK_PRECOMPACTION_THRESHOLD_RATIO = DEFAULT_PRECOMPACTION_THRESHOLD_RATIO;
 const THINKTANK_PRECOMPACTION_COOLDOWN_MS = 10 * 60 * 1000;
 const READ_WRITE_TOOL_WARNING = `Tool use is public in this room. Reads, searches, and bash exploration may proceed.
@@ -326,6 +342,7 @@ export class ThinktankRoomRuntime {
 	private failurePolicyStates = new Map<LabId, AgentFailurePolicyState>();
 	private standingTrailers = new Map<LabId, SpeakerTrailer>();
 	private maxRounds: number;
+	private labTools?: readonly string[] | "all";
 	private roomHalted = false;
 	private currentHumanPrompt = "";
 	private currentHumanImages: ImageContent[] = [];
@@ -345,12 +362,21 @@ export class ThinktankRoomRuntime {
 		rosterSelections: ThinktankRosterModels;
 		callbacks: ThinktankRoomCallbacks;
 		maxRounds?: number;
+		/**
+		 * Tool access for lab agents:
+		 *  - undefined (default): the built-in coding tools plus all extension/MCP
+		 *    tools, minus the interactive desktop-control tools.
+		 *  - "all": every registered tool, including desktop control.
+		 *  - string[]: an explicit allowlist (exactly these tool names).
+		 */
+		labTools?: readonly string[] | "all";
 	}) {
 		this.services = options.services;
 		this.deps = options.deps;
 		this.cwd = options.cwd;
 		this.callbacks = options.callbacks;
 		this.maxRounds = Math.max(1, options.maxRounds ?? DEFAULT_MAX_ROUNDS);
+		this.labTools = options.labTools;
 		this.roomSessionDir = createRoomSessionDir(options.cwd);
 		this.transcriptPath = join(this.roomSessionDir, "transcript.jsonl");
 		this.readyPromise = this.rebuildAgents(options.rosterSelections);
@@ -458,7 +484,7 @@ export class ThinktankRoomRuntime {
 				services: this.services,
 				model,
 				thinkingLevel,
-				tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+				...this.resolveLabToolOptions(),
 			});
 
 			const labAgent: LabAgentRuntime = {
@@ -479,6 +505,20 @@ export class ThinktankRoomRuntime {
 
 	private getPublicActionKey(agent: LabAgentRuntime, toolCallId: string): string {
 		return `${agent.definition.id}:${toolCallId}`;
+	}
+
+	// Translate the room's labTools policy into createLabSession options.
+	// An explicit allowlist is passed through as `tools`; otherwise the session is
+	// created with no allowlist (all tools available) and the adapter activates
+	// the full set minus `excludeTools`.
+	private resolveLabToolOptions(): { tools?: readonly string[]; excludeTools?: readonly string[] } {
+		if (Array.isArray(this.labTools)) {
+			return { tools: this.labTools };
+		}
+		if (this.labTools === "all") {
+			return { excludeTools: [] };
+		}
+		return { excludeTools: [...THINKTANK_INTERACTIVE_DESKTOP_TOOLS] };
 	}
 
 	private recordAgentSessionEvent(agent: LabAgentRuntime, event: ThinktankSessionEventLike): void {

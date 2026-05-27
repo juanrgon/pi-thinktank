@@ -273,7 +273,15 @@ export interface ThinktankCreateLabSessionOptions {
 	readonly services: ThinktankServicesLike;
 	readonly model: ThinktankModelLike;
 	readonly thinkingLevel: ThinkingLevelLike;
-	readonly tools: ReadonlyArray<string>;
+	/**
+	 * Explicit tool allowlist. When provided, only these tools are enabled.
+	 * When omitted, the session is created with no allowlist (all built-in +
+	 * extension/MCP tools available) and the adapter activates the full set
+	 * minus `excludeTools`.
+	 */
+	readonly tools?: ReadonlyArray<string>;
+	/** Tool names to exclude from the full set when `tools` is omitted. */
+	readonly excludeTools?: ReadonlyArray<string>;
 }
 
 /**
