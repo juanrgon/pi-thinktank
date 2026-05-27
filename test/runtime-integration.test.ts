@@ -248,6 +248,117 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		room.dispose();
 	});
 
+	test("interrupting an active turn records partial output and primes recovery context for the next agent", async () => {
+		const services = new FakeServices({
+			models: [
+				createFakeModel({
+					provider: "github-copilot",
+					id: "gpt-5.5",
+					name: "GPT-5.5",
+				}),
+				createFakeModel({
+					provider: "anthropic",
+					id: "claude-opus-4.7",
+					name: "Claude Opus 4.7",
+				}),
+			],
+		});
+		const deps = new FakeRuntimeDeps();
+		const interruptions: { interrupted: string; interrupter: string; reason: string }[] = [];
+
+		const room = new ThinktankRoomRuntime({
+			services,
+			deps,
+			cwd: `/tmp/thinktank-f4-interrupt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			rosterSelections: {},
+			callbacks: {
+				onInterrupt: (agent, interrupter, reason) => {
+					interruptions.push({
+						interrupted: agent.id,
+						interrupter: typeof interrupter === "string" ? interrupter : interrupter.id,
+						reason,
+					});
+				},
+			},
+		});
+		await room.ready();
+
+		assert.equal(deps.createdSessions.length, 2);
+		const openaiIdx = deps.createLabSessionCalls.findIndex((c) => c.model.provider === "github-copilot");
+		const anthropicIdx = deps.createLabSessionCalls.findIndex((c) => c.model.provider === "anthropic");
+		const openaiSession = deps.createdSessions[openaiIdx];
+		const anthropicSession = deps.createdSessions[anthropicIdx];
+		assert.ok(openaiSession && anthropicSession);
+
+		// Openai's opening turn uses a 'run' script: it emits a partial
+		// message_update with visible text, then waits for session.aborted to
+		// flip true (which happens when the runtime forwards the interrupt to
+		// session.abort()). Resolving normally is fine; the runtime detects
+		// the interruption via activeTurn.interruptedBy regardless of how
+		// session.prompt settled.
+		openaiSession.queuePromptScript({
+			kind: "run",
+			run: async (session) => {
+				session.emit({
+					type: "message_update",
+					message: { role: "assistant", content: "partial output before interruption" },
+				});
+				// Spin until the test triggers interruption.
+				const start = Date.now();
+				while (!session.aborted) {
+					await new Promise((r) => setTimeout(r, 5));
+					if (Date.now() - start > 5_000) throw new Error("timeout waiting for abort");
+				}
+			},
+		});
+
+		// Anthropic should run normally after openai is interrupted.
+		anthropicSession.queuePromptMessage("anthropic recovers cleanly");
+
+		const promptDone = room.submitHumanPrompt("please respond briefly");
+
+		// Wait until openai's run script has started.
+		const openaiStart = Date.now();
+		while (openaiSession.promptCalls.length === 0) {
+			await new Promise((r) => setTimeout(r, 5));
+			if (Date.now() - openaiStart > 5_000) {
+				throw new Error("timeout waiting for openai prompt to start");
+			}
+		}
+
+		// Fire the interruption while openai's prompt is still in-flight.
+		await room.interruptActiveTurn("test-user pressed /interrupt", "user");
+
+		await promptDone;
+
+		assert.equal(openaiSession.aborted, true, "openai session should have been aborted");
+
+		assert.equal(interruptions.length, 1, "onInterrupt should fire once");
+		assert.equal(interruptions[0]?.interrupted, "openai");
+		assert.equal(interruptions[0]?.interrupter, "user");
+		assert.match(interruptions[0]?.reason ?? "", /test-user pressed/);
+
+		// After the interruption, anthropic's prompt should include the
+		// recovery context produced by formatInterruptionRecoveryContext.
+		assert.ok(
+			anthropicSession.promptCalls.length >= 1,
+			"anthropic should have been prompted after the interruption",
+		);
+		const anthropicFirstPrompt = anthropicSession.promptCalls[0]?.prompt ?? "";
+		assert.match(
+			anthropicFirstPrompt,
+			/The previous turn was interrupted\./,
+			"next agent's prompt should include the interruption recovery fragment",
+		);
+		assert.match(
+			anthropicFirstPrompt,
+			/partial output before interruption/,
+			"next agent should see the interrupted agent's partial visible output",
+		);
+
+		room.dispose();
+	});
+
 	test("submitHumanPrompt drives an opening turn on the only enabled agent", async () => {
 		const services = new FakeServices({
 			models: [
