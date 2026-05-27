@@ -30,6 +30,7 @@ jobs:
           node --experimental-strip-types --check agent-error.ts
           node --experimental-strip-types --check agent-failure-policy.ts
           node --experimental-strip-types --check compaction-retry.ts
+          node --experimental-strip-types --check control-trailer.ts
           node --experimental-strip-types --check interruption.ts
           node --experimental-strip-types --check precompaction.ts
           node --experimental-strip-types --check roster-thinking.ts
@@ -37,8 +38,8 @@ jobs:
           node --experimental-strip-types --check roster.ts
           node --experimental-strip-types --check runtime-default-deps.ts
           node --experimental-strip-types --check runtime-deps.ts
+          node --experimental-strip-types --check scheduler.ts
           node --experimental-strip-types --check transcript-text.ts
-          node --experimental-strip-types --check turn-impulse.ts
           node --experimental-strip-types --check room-runtime.ts
           node --experimental-strip-types --check index.ts
           node --experimental-strip-types --check lib.ts

@@ -83,7 +83,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		room.dispose();
 	});
 
-	test("agent suppressed after two same-category failures inside one collaborative prompt", async () => {
+	test("agent suppressed after two same-category failures, driven by a peer handoff", async () => {
 		// Two enabled labs so the failing one can be suppressed rather than
 		// triggering the last-agent halt path.
 		const services = new FakeServices({
@@ -124,48 +124,35 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		const anthropicSession = deps.createdSessions[anthropicIdx];
 		assert.ok(openaiSession && anthropicSession);
 
-		// Script openai to fail with the same error category every time.
-		// "503" classifies as provider_error in agent-error.ts. Queue many
-		// errors; only the first two should actually be consumed because the
-		// second failure triggers suppression for the rest of the prompt.
+		// openai fails with the same category every time it is selected.
+		// "503" classifies as provider_error in agent-error.ts.
 		const providerError = new Error("503 Service Unavailable from provider");
 		for (let i = 0; i < 5; i++) {
 			openaiSession.queuePromptScript({ kind: "error", error: providerError });
 		}
 
-		// Script anthropic to succeed many times so the dynamic phase has
-		// something to keep doing while the room satisfies the collaboration
-		// minimum exchange floor.
-		for (let i = 0; i < 8; i++) {
-			anthropicSession.queuePromptMessage(`anthropic reply ${i + 1}`);
-		}
+		// anthropic speaks the opening turn and hands the floor back to openai via
+		// a CONTROL trailer, forcing openai's second selection (and second failure,
+		// which trips suppression). Then anthropic declares the room done.
+		anthropicSession.queuePromptMessage('anthropic opening reply\nCONTROL: {"next": "openai", "bid": 90}');
+		anthropicSession.queuePromptMessage('anthropic wraps up\nCONTROL: {"done": true}');
 
-		// Use a collaboration-style human prompt so isCollaborationPrompt fires
-		// and minDynamicExchanges = agents.length * 2 = 4. The forced_continuation
-		// fallback will then re-pick openai during the dynamic phase even after
-		// its opening turn failed, giving it a second chance to fail and trip
-		// the suppression threshold.
-		await room.submitHumanPrompt("please iterate on this together");
+		await room.submitHumanPrompt("please review this change");
 
-		// Suppression triggers after the SECOND same-category failure. Once it
-		// trips, activeAgents() filters openai out, so subsequent turns can
-		// only be assigned to anthropic. Therefore openai's prompt() should
-		// have been called exactly twice, not more.
+		// Opening picks openai first (rotation order), it fails (#1). Opening then
+		// picks anthropic, which nominates openai. The handoff re-selects openai,
+		// it fails (#2) and is suppressed. openai is therefore prompted exactly twice.
 		assert.equal(
 			openaiSession.promptCalls.length,
 			2,
-			`openai should have been called exactly twice (opening + one forced-continuation) before suppression; recorded: ${openaiSession.promptCalls.length}`,
+			`openai should have been called exactly twice (opening + handoff) before suppression; recorded: ${openaiSession.promptCalls.length}`,
 		);
 
-		// Anthropic should have been called several times: opening turn +
-		// one or more dynamic turns once openai is out of the pool.
 		assert.ok(
-			anthropicSession.promptCalls.length >= 3,
-			`anthropic should have been called at least 3 times; recorded: ${anthropicSession.promptCalls.length}`,
+			anthropicSession.promptCalls.length >= 1,
+			`anthropic should have spoken at least once; recorded: ${anthropicSession.promptCalls.length}`,
 		);
 
-		// Both errors should have been classified the same way (provider_error)
-		// for suppression to fire. If classify drifted, this catches it.
 		const openaiErrors = errorEvents.filter((e) => e.id === "openai");
 		assert.equal(openaiErrors.length, 2, "expected exactly two openai errors");
 		assert.equal(openaiErrors[0]?.category, "provider_error");
@@ -174,7 +161,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		room.dispose();
 	});
 
-	test("collaboration prompts force continuation even when impulse polls pass", async () => {
+	test("control trailers drive dynamic continuation and stop on consensus, with zero scheduling model calls", async () => {
 		const services = new FakeServices({
 			models: [
 				createFakeModel({
@@ -195,7 +182,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		const room = new ThinktankRoomRuntime({
 			services,
 			deps,
-			cwd: `/tmp/thinktank-f4-force-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			cwd: `/tmp/thinktank-f4-trailers-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 			rosterSelections: {},
 			callbacks: {
 				onAgentTurnEnd: (agent, text) => endedTurns.push(`${agent.id}:${text}`),
@@ -205,44 +192,49 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 
 		const openaiIdx = deps.createLabSessionCalls.findIndex((c) => c.model.provider === "github-copilot");
 		const anthropicIdx = deps.createLabSessionCalls.findIndex((c) => c.model.provider === "anthropic");
-		assert.ok(openaiIdx >= 0 && anthropicIdx >= 0, "both labs should have session-create calls");
 		const openaiSession = deps.createdSessions[openaiIdx];
 		const anthropicSession = deps.createdSessions[anthropicIdx];
 		assert.ok(openaiSession && anthropicSession);
 
-		openaiSession.queuePromptMessage("openai opening");
-		openaiSession.queuePromptMessage("openai forced 1");
-		openaiSession.queuePromptMessage("openai forced 2");
-		anthropicSession.queuePromptMessage("anthropic opening");
-		anthropicSession.queuePromptMessage("anthropic forced 1");
-		anthropicSession.queuePromptMessage("anthropic forced 2");
+		// Opening lap: both stay engaged with a bid. Then they alternate by bid
+		// until both declare done. The CONTROL lines must be stripped from the
+		// visible transcript text the callbacks receive.
+		openaiSession.queuePromptMessage('openai opening\nCONTROL: {"bid": 80}');
+		openaiSession.queuePromptMessage('openai second\nCONTROL: {"done": true}');
+		anthropicSession.queuePromptMessage('anthropic opening\nCONTROL: {"bid": 80}');
+		anthropicSession.queuePromptMessage('anthropic second\nCONTROL: {"done": true}');
 
-		// FakeRuntimeDeps.completeSimple defaults to malformed impulse JSON ("{}"),
-		// so every hidden impulse poll passes. The collaboration prompt should
-		// still force four dynamic turns after the two opening turns.
-		await room.submitHumanPrompt("please iterate together without me");
+		await room.submitHumanPrompt("please discuss this design");
 
 		assert.deepEqual(endedTurns, [
 			"openai:openai opening",
 			"anthropic:anthropic opening",
-			"openai:openai forced 1",
-			"anthropic:anthropic forced 1",
-			"openai:openai forced 2",
-			"anthropic:anthropic forced 2",
+			"openai:openai second",
+			"anthropic:anthropic second",
 		]);
-		assert.equal(openaiSession.promptCalls.length, 3);
-		assert.equal(anthropicSession.promptCalls.length, 3);
+		assert.equal(openaiSession.promptCalls.length, 2);
+		assert.equal(anthropicSession.promptCalls.length, 2);
+
+		// The core ADR-0002 guarantee: scheduling spends zero model calls.
+		assert.equal(
+			deps.completionCalls.length,
+			0,
+			`scheduling must not call completeSimple; recorded ${deps.completionCalls.length}`,
+		);
 
 		const roomEvents = readFileSync(room.transcriptFile, "utf8")
 			.trim()
 			.split("\n")
 			.filter(Boolean)
-			.map((line) => JSON.parse(line) as { type?: string; reason?: string });
-		const forcedContinuations = roomEvents.filter((event) => event.type === "forced_continuation");
-		assert.equal(forcedContinuations.length, 4, "expected one forced continuation per required dynamic turn");
+			.map((line) => JSON.parse(line) as { type?: string; decision?: { action?: string; reason?: string } });
+		const selections = roomEvents.filter((event) => event.type === "turn_selection");
+		const speakReasons = selections
+			.filter((event) => event.decision?.action === "speak")
+			.map((event) => event.decision?.reason);
+		assert.deepEqual(speakReasons, ["opening", "opening", "bid", "bid"]);
 		assert.ok(
-			forcedContinuations.every((event) => event.reason === "below_minimum_collaboration_exchanges"),
-			"forced continuations should be due to collaboration minimum",
+			selections.some((event) => event.decision?.action === "stop" && event.decision?.reason === "all_done"),
+			"the room should stop via the all_done consensus",
 		);
 
 		room.dispose();
@@ -452,10 +444,9 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		assert.ok(session, "runtime should have created exactly one fake session");
 		session.queuePromptMessage("hello from gpt");
 
-		// Use a prompt without collaboration keywords so the dynamic phase
-		// goes idle immediately after openings (default minDynamicExchanges=0).
-		// completeSimple is not seeded so the impulse poll returns malformed
-		// JSON, which is treated as pass with urgency 0 -> chooser returns idle.
+		// A single agent emits no CONTROL trailer, so its standing trailer is
+		// absent (treated as yielding). After the one opening turn the scheduler
+		// has no eager candidate left and stops, giving exactly one prompt call.
 		await room.submitHumanPrompt("simple test prompt without keywords");
 
 		// The runtime should have invoked session.prompt exactly once for the
@@ -579,6 +570,97 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		// createLabSession should only have fired for the enabled lab.
 		assert.equal(deps.createLabSessionCalls.length, 1);
 		assert.equal(deps.createLabSessionCalls[0]?.model.provider, "github-copilot");
+
+		room.dispose();
+	});
+
+	test("a non-throwing provider error (stopReason=error) is surfaced, not silently swallowed", async () => {
+		// Reproduces the real claude-opus-4.7 case found in manual testing: the
+		// provider returns an assistant message with stopReason "error" and empty
+		// content WITHOUT throwing from prompt(). The runtime must still surface it.
+		const services = new FakeServices({
+			models: [createFakeModel({ provider: "github-copilot", id: "gpt-5.5", name: "GPT-5.5" })],
+		});
+		const deps = new FakeRuntimeDeps();
+		const turnErrors: string[] = [];
+
+		const room = new ThinktankRoomRuntime({
+			services,
+			deps,
+			cwd: `/tmp/thinktank-f4-nonthrow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			rosterSelections: {},
+			callbacks: {
+				onAgentTurnError: (agent, _phase, error) => turnErrors.push(`${agent.id}:${error.category}`),
+			},
+		});
+		await room.ready();
+
+		const session = deps.createdSessions[0];
+		assert.ok(session);
+		session.queuePromptScript({
+			kind: "message",
+			message: {
+				role: "assistant",
+				content: [],
+				stopReason: "error",
+				errorMessage:
+					'400 {"error":{"message":"output_config.effort \\"low\\" is not supported by model claude-opus-4.7","code":"invalid_reasoning_effort"}}',
+			} as never,
+		});
+
+		await room.submitHumanPrompt("answer briefly");
+
+		// The failed turn must surface exactly once and classify correctly, and the
+		// runtime must not loop re-selecting the failing agent.
+		assert.deepEqual(turnErrors, ["openai:unsupported_thinking_level"]);
+		assert.equal(session.promptCalls.length, 1, "a surfaced error must not loop into re-selection");
+
+		room.dispose();
+	});
+
+	test("a handoff to a non-responding agent does not loop the room", async () => {
+		// Reproduces the manual-test loop: agent A nominates B via CONTROL next, but
+		// B produces no visible contribution. The room must not hand the floor to B
+		// indefinitely (the old transcript-derived last-speaker did exactly that).
+		const services = new FakeServices({
+			models: [
+				createFakeModel({ provider: "github-copilot", id: "gpt-5.5", name: "GPT-5.5" }),
+				createFakeModel({ provider: "anthropic", id: "claude-opus-4.7", name: "Claude Opus 4.7" }),
+			],
+		});
+		const deps = new FakeRuntimeDeps();
+
+		const room = new ThinktankRoomRuntime({
+			services,
+			deps,
+			cwd: `/tmp/thinktank-f4-noloop-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			rosterSelections: {},
+			maxRounds: 3,
+			callbacks: {},
+		});
+		await room.ready();
+
+		const openaiIdx = deps.createLabSessionCalls.findIndex((c) => c.model.provider === "github-copilot");
+		const anthropicIdx = deps.createLabSessionCalls.findIndex((c) => c.model.provider === "anthropic");
+		const openaiSession = deps.createdSessions[openaiIdx];
+		const anthropicSession = deps.createdSessions[anthropicIdx];
+		assert.ok(openaiSession && anthropicSession);
+
+		// openai nominates anthropic and bids to stay engaged.
+		openaiSession.queuePromptMessage('openai opening\nCONTROL: {"next": "anthropic", "bid": 80}');
+		// anthropic only ever emits an (empty-prose) control line with a high bid:
+		// no visible contribution. It must be treated as a yield, not re-selected.
+		for (let i = 0; i < 8; i++) {
+			anthropicSession.queuePromptMessage('CONTROL: {"bid": 99}');
+		}
+
+		await room.submitHumanPrompt("discuss briefly");
+
+		assert.equal(
+			anthropicSession.promptCalls.length,
+			1,
+			`anthropic should be selected once (its opening) and then treated as yielding, not looped; recorded: ${anthropicSession.promptCalls.length}`,
+		);
 
 		room.dispose();
 	});

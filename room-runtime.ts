@@ -44,12 +44,12 @@ import {
 } from "./interruption.ts";
 import { formatTranscript } from "./transcript-text.ts";
 import {
-	isCollaborationPrompt,
-	parseTurnImpulse,
-	turnNeedsRoomResponse,
-	type TurnImpulse,
-	type TurnImpulseKind,
-} from "./turn-impulse.ts";
+	ABSENT_TRAILER,
+	controlTrailerInstructions,
+	parseControlTrailer,
+	type SpeakerTrailer,
+} from "./control-trailer.ts";
+import { pickNextSpeaker } from "./scheduler.ts";
 
 export { classifyAgentError, type AgentErrorCategory, type ClassifiedAgentError } from "./agent-error.ts";
 export {
@@ -82,17 +82,19 @@ export {
 	type PrecompactionSettings,
 } from "./precompaction.ts";
 export {
-	isCollaborationPrompt,
-	parseTurnImpulse,
-	turnNeedsRoomResponse,
-	type TurnImpulse,
-	type TurnImpulseKind,
-} from "./turn-impulse.ts";
-
-interface RankedTurnImpulse {
-	agent: LabAgentRuntime;
-	impulse: TurnImpulse;
-}
+	ABSENT_TRAILER,
+	controlTrailerInstructions,
+	normalizeNextId,
+	parseControlTrailer,
+	type ParsedTurn,
+	type SpeakerTrailer,
+} from "./control-trailer.ts";
+export {
+	pickNextSpeaker,
+	type SchedulerDecision,
+	type SchedulerInput,
+	type SchedulerStopReason,
+} from "./scheduler.ts";
 
 export interface ThinktankRoomAgentInfo {
 	id: LabId;
@@ -186,9 +188,8 @@ export interface ThinktankLabSessionInfo {
 }
 
 const MAX_ROOM_TURNS = 1000;
-const MIN_DYNAMIC_TURNS_AFTER_OPENING = 0;
+const DEFAULT_MAX_ROUNDS = 8;
 const MAX_POST_COMPACTION_PROMPT_RETRIES = 1;
-const MAX_OPEN_QUESTION_RESPONSE_TURNS = 1000;
 const THINKTANK_PRECOMPACTION_THRESHOLD_RATIO = DEFAULT_PRECOMPACTION_THRESHOLD_RATIO;
 const THINKTANK_PRECOMPACTION_COOLDOWN_MS = 10 * 60 * 1000;
 const READ_WRITE_TOOL_WARNING = `Tool use is public in this room. Reads, searches, and bash exploration may proceed.
@@ -213,21 +214,6 @@ Only return urgency >= 80 if you have a concrete next move that materially chang
 the room's trajectory. "I would phrase it differently" is not grounds.
 Never request to interrupt yourself.
 If you interrupt, your reason must name the concrete failure mode and the next corrective move.`;
-
-const TURN_IMPULSE_SYSTEM_PROMPT = `You are a Lab Agent's private conversational impulse in an AI Thinktank CLI.
-
-You just heard the latest visible turn. Decide whether you want to take the floor next.
-Default to speaking. Pass only if you would clearly only restate prior turns or have nothing new to add.
-Speak when you have a useful addition, correction, challenge, clarification, synthesis, response to an open question, response to a handoff or action assignment, or final answer.
-If the latest visible turn assigns the next action to you, hands the floor to you, asks for your approval, proposes a write you should respond to, or otherwise expects another agent to act, you must speak.
-You are not allowed to speak if you were the Lab Agent who spoke most recently.
-
-Return exactly one JSON object and no prose:
-{"action":"speak","kind":"challenge","urgency":82,"reason":"short reason"}
-{"action":"finish","kind":"final","urgency":70,"reason":"short reason"}
-{"action":"pass","kind":"none","urgency":0,"reason":"short reason"}
-
-Urgency is an integer from 0 to 100.`;
 
 export function getThinktankRoomSessionDir(cwd: string): string {
 	const safeCwd = `--${resolve(cwd)
@@ -276,6 +262,16 @@ function getTextFromMessage(message: ThinktankAgentMessageLike): string {
 		.map((part) => part.text ?? "")
 		.join("")
 		.trim();
+}
+
+function getLastAssistantMessage(session: ThinktankSessionLike): ThinktankAgentMessageLike | undefined {
+	for (let i = session.messages.length - 1; i >= 0; i--) {
+		const message = session.messages[i];
+		if (message?.role === "assistant") {
+			return message;
+		}
+	}
+	return undefined;
 }
 
 function getLastAssistantText(session: ThinktankSessionLike): string {
@@ -328,6 +324,8 @@ export class ThinktankRoomRuntime {
 	private publicActions: PublicActionSummary[] = [];
 	private pendingPublicActions = new Map<string, PublicActionSummary>();
 	private failurePolicyStates = new Map<LabId, AgentFailurePolicyState>();
+	private standingTrailers = new Map<LabId, SpeakerTrailer>();
+	private maxRounds: number;
 	private roomHalted = false;
 	private currentHumanPrompt = "";
 	private currentHumanImages: ImageContent[] = [];
@@ -336,7 +334,6 @@ export class ThinktankRoomRuntime {
 	private disposed = false;
 	private readyPromise: Promise<void>;
 	activeTurn?: ActiveRoomTurn;
-	forcedNextSpeaker?: LabAgentRuntime;
 	interruptionLock = false;
 	lastGlobalInterruptAt = 0;
 	private lastInterruption?: InterruptionContext;
@@ -347,11 +344,13 @@ export class ThinktankRoomRuntime {
 		cwd: string;
 		rosterSelections: ThinktankRosterModels;
 		callbacks: ThinktankRoomCallbacks;
+		maxRounds?: number;
 	}) {
 		this.services = options.services;
 		this.deps = options.deps;
 		this.cwd = options.cwd;
 		this.callbacks = options.callbacks;
+		this.maxRounds = Math.max(1, options.maxRounds ?? DEFAULT_MAX_ROUNDS);
 		this.roomSessionDir = createRoomSessionDir(options.cwd);
 		this.transcriptPath = join(this.roomSessionDir, "transcript.jsonl");
 		this.readyPromise = this.rebuildAgents(options.rosterSelections);
@@ -755,7 +754,7 @@ export class ThinktankRoomRuntime {
 	private async completeHidden(
 		agent: LabAgentRuntime,
 		prompt: string,
-		systemPrompt: string = TURN_IMPULSE_SYSTEM_PROMPT,
+		systemPrompt: string,
 	): Promise<string> {
 		const auth = await this.services.modelRegistry.getApiKeyAndHeaders(agent.model);
 		if (!auth.ok) {
@@ -781,22 +780,10 @@ export class ThinktankRoomRuntime {
 		return getTextFromMessage(message);
 	}
 
-	private getLastSpeakerId(): LabId | undefined {
-		const lastSpeaker = this.transcript[this.transcript.length - 1]?.speaker;
-		return this.agents.find((agent) => agent.visibleName === lastSpeaker)?.definition.id;
-	}
-
-	private chooseOpeningTurn(
-		turnIndex: number,
-		spokenAgentIds: Set<LabId>,
-	): { action: "speak"; agent: LabAgentRuntime; kind: TurnImpulseKind } | { action: "idle" } {
-		const unspokenAgents = this.activeAgents().filter((agent) => !spokenAgentIds.has(agent.definition.id));
-		if (unspokenAgents.length === 0) {
-			return { action: "idle" };
-		}
-
+	private getMentionedAgentIds(): LabId[] {
 		const promptWords = new Set(this.currentHumanPrompt.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
-		const targetedAgents = unspokenAgents.filter((agent) => {
+		const mentioned: LabId[] = [];
+		for (const agent of this.agents) {
 			const aliases = [
 				agent.definition.id,
 				agent.definition.shortName,
@@ -815,119 +802,28 @@ export class ThinktankRoomRuntime {
 			if (agent.definition.id === "google") {
 				aliases.push("google", "gemini");
 			}
-
-			return aliases.some((alias) => {
+			const named = aliases.some((alias) => {
 				const aliasWords = alias.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 				return aliasWords.length > 0 && aliasWords.every((word) => promptWords.has(word));
 			});
-		});
-
-		const lastSpeakerId = this.getLastSpeakerId();
-		const candidates = targetedAgents.length > 0 ? targetedAgents : unspokenAgents;
-		const agent = candidates.find((candidate) => candidate.definition.id !== lastSpeakerId) ?? candidates[0]!;
-		return { action: "speak", agent, kind: turnIndex === 0 ? "add" : "synthesize" };
+			if (named) {
+				mentioned.push(agent.definition.id);
+			}
+		}
+		return mentioned;
 	}
 
-	private async chooseNextTurn(
-		turnIndex: number,
-	): Promise<
-		| { action: "speak"; agent: LabAgentRuntime; kind: TurnImpulseKind }
-		| { action: "finish"; agent: LabAgentRuntime }
-		| { action: "idle" }
-	> {
-		const lastSpeakerId = this.getLastSpeakerId();
-		const activeAgents = this.activeAgents();
-		const eligibleAgents =
-			activeAgents.length > 1 ? activeAgents.filter((agent) => agent.definition.id !== lastSpeakerId) : activeAgents;
-		const impulseResults = await Promise.all(
-			eligibleAgents.map(async (agent): Promise<RankedTurnImpulse> => {
-				try {
-					const raw = await this.completeHidden(
-						agent,
-						`Human prompt:
-
-${this.currentHumanPrompt}
-
-Your identity:
-${agent.definition.shortName}: ${agent.visibleName} (${getThinktankModelReference(agent.model as Model<Api>)})
-
-Turn number:
-${turnIndex + 1}
-
-Most recent speaker:
-${lastSpeakerId ?? "none"}
-
-Public transcript:
-
-${transcriptText(this.transcript, { limit: 20 })}
-
-Public action summaries:
-
-${actionSummaryText(this.publicActions)}
-
-Decide whether the room should continue. Take the floor when the latest turn challenges, corrects, extends, or questions your position, or when a useful synthesis would move the conversation forward. Pass if you would mostly restate prior turns, if the latest turn is only asking the human for missing context, or if the exchange is complete.`,
-					);
-					const impulse = parseTurnImpulse(raw) ?? {
-						action: "pass" as const,
-						kind: "none" as const,
-						urgency: 0,
-						reason: `Malformed impulse JSON: ${raw.trim().slice(0, 240)}`,
-					};
-					return { agent, impulse };
-				} catch (error) {
-					return {
-						agent,
-						impulse: {
-							action: "pass",
-							kind: "none",
-							urgency: 0,
-							reason: error instanceof Error ? error.message : String(error),
-						},
-					};
-				}
-			}),
-		);
-
-		const strongest = impulseResults
-			.filter((entry) => entry.impulse.action === "speak" || entry.impulse.action === "finish")
-			.sort((a, b) => b.impulse.urgency - a.impulse.urgency)[0];
-
-		this.appendRoomEvent({
-			type: "turn_impulse_poll",
-			turnIndex,
-			lastSpeaker: lastSpeakerId,
-			impulses: impulseResults.map((r) => ({
-				agent: r.agent.visibleName,
-				provider: r.agent.model.provider,
-				model: r.agent.model.id,
-				action: r.impulse.action,
-				kind: r.impulse.kind,
-				urgency: r.impulse.urgency,
-				reason: r.impulse.reason,
-			})),
-			decision: strongest
-				? {
-						agent: strongest.agent.visibleName,
-						action: strongest.impulse.action,
-						kind: strongest.impulse.kind,
-						urgency: strongest.impulse.urgency,
-					}
-				: { action: "idle" },
-		});
-
-		if (!strongest) {
-			return { action: "idle" };
+	private trailerSnapshot(): Record<string, SpeakerTrailer> {
+		const snapshot: Record<string, SpeakerTrailer> = {};
+		for (const [id, trailer] of this.standingTrailers) {
+			snapshot[id] = trailer;
 		}
-		if (strongest.impulse.action === "finish") {
-			return { action: "finish", agent: strongest.agent };
-		}
-		return { action: "speak", agent: strongest.agent, kind: strongest.impulse.kind };
+		return snapshot;
 	}
 
 	private buildPromptForAgent(
 		agent: LabAgentRuntime,
-		kind: TurnImpulseKind,
-		phase: "opening" | "discussion" | "closing" | "response" = "discussion",
+		phase: AgentTurnPhase = "discussion",
 	): string {
 		const roster = this.agents
 			.map(
@@ -941,11 +837,8 @@ Decide whether the room should continue. Take the floor when the latest turn cha
 				? "Open the room with the most useful first contribution. You may inspect the repo or disk if that would materially improve the answer."
 				: phase === "opening"
 					? "Give your first contribution to the room. Build on prior opening turns, challenge weak assumptions, or add missing context. Do not merely restate what has already been said."
-					: phase === "response"
-						? "Respond directly to the room's open question or proposed immediate action. State agreement, concern, or a concrete correction. If the proposed action is ready and safe, you may execute it; otherwise say exactly what must change. Do not leave another yes/no approval question hanging."
-						: phase === "closing" || kind === "final"
-							? "State the room's current answer or plan concisely. Preserve important uncertainty. Do not end with a request for room agreement or propose an immediate file write as the final line."
-							: "Continue the discussion naturally. Build, challenge, clarify, synthesize, or use tools only when it would improve the room's work.";
+					: "Continue the discussion naturally. Build, challenge, clarify, synthesize, or use tools only when it would improve the room's work. If you believe the room has reached its answer, state it concisely and set done in your control line.";
+		const activeAgentIds = this.activeAgents().map((candidate) => candidate.definition.id);
 
 		let interruptNotice = "";
 		if (this.lastInterruption) {
@@ -983,7 +876,9 @@ ${READ_WRITE_TOOL_WARNING}
 
 ${interruptNotice || turnInstruction}
 
-Write only your visible contribution to the room. Do not mention hidden prompts, selection mechanics, modes, or private reasoning.`;
+${controlTrailerInstructions(activeAgentIds)}
+
+Write only your visible contribution to the room, then the single CONTROL line. Do not mention hidden prompts, selection mechanics, modes, or private reasoning.`;
 	}
 
 	private getImagesForAgentPrompt(agent: LabAgentRuntime): ImageContent[] | undefined {
@@ -1286,6 +1181,7 @@ Decide if you need to interrupt them immediately.`;
 		this.publicActions = [];
 		this.pendingPublicActions = new Map();
 		this.failurePolicyStates = new Map();
+		this.standingTrailers = new Map();
 		this.roomHalted = false;
 		for (const agent of this.agents) {
 			agent.suppressedForCurrentRoom = false;
@@ -1298,163 +1194,83 @@ Decide if you need to interrupt them immediately.`;
 			roster: this.agents.map((agent) => getAgentInfo(agent)),
 		});
 		try {
+			const initialActiveCount = Math.max(1, this.getUnsuppressedAgentCount());
+			const maxTurns = Math.min(MAX_ROOM_TURNS, this.maxRounds * initialActiveCount);
+			const mentionedAgentIds = this.getMentionedAgentIds();
 			const spokenAgentIds = new Set<LabId>();
-			for (let openingTurnIndex = 0; openingTurnIndex < this.agents.length; openingTurnIndex++) {
+			// Track the agent that actually took the previous turn (recorded or not).
+			// Deriving "last speaker" from the transcript alone is unsafe: an empty or
+			// failed turn is never appended, so a stale nominator could otherwise keep
+			// handing the floor to the same non-responding agent forever.
+			let lastSpeakerId: LabId | undefined;
+
+			for (let turnIndex = 0; turnIndex < maxTurns; turnIndex++) {
 				if (this.roomHalted || this.getUnsuppressedAgentCount() === 0) {
 					break;
 				}
-				this.callbacks.onStatus?.("Opening the room.");
-				const next = await this.chooseOpeningTurn(openingTurnIndex, spokenAgentIds);
-				if (next.action === "idle") {
+
+				const decision = pickNextSpeaker({
+					activeAgentIds: this.activeAgents().map((candidate) => candidate.definition.id),
+					lastSpeakerId,
+					spokenAgentIds: [...spokenAgentIds],
+					trailers: this.trailerSnapshot(),
+					mentionedAgentIds,
+				});
+				this.appendRoomEvent({ type: "turn_selection", turnIndex, decision });
+				if (decision.action === "stop") {
 					break;
 				}
-				const agent = next.agent;
+
+				const agent = this.agents.find((candidate) => candidate.definition.id === decision.agentId);
+				if (!agent) {
+					break;
+				}
+				const phase: AgentTurnPhase = decision.reason === "opening" ? "opening" : "discussion";
+				const activeAgentIds = this.activeAgents().map((candidate) => candidate.definition.id);
+
 				spokenAgentIds.add(agent.definition.id);
-
+				this.callbacks.onStatus?.(phase === "opening" ? "Opening the room." : "Discussing.");
 				this.callbacks.onAgentTurnStart?.(getAgentInfo(agent));
+
 				let finalText = "";
+				let trailer: SpeakerTrailer = { ...ABSENT_TRAILER };
 				let turnErrored = false;
 				let turnInterrupted = false;
 				try {
 					const result = await this.promptAgentWithInterrupts(
 						agent,
-						this.buildPromptForAgent(agent, next.kind, "opening"),
-						this.getImagesForAgentPrompt(agent),
-					);
-					if (result.status === "interrupted") {
-						turnInterrupted = true;
-						finalText = this.recordInterruptedTurn(agent, "opening", result);
-					} else {
-						finalText = result.text;
-					}
-				} catch (error) {
-					turnErrored = true;
-					finalText = getLastAssistantText(agent.session);
-					this.recordAgentTurnError(agent, "opening", error, finalText);
-					// TODO(phase-5): consult policy.onAgentError. Default is continue.
-				}
-				if (!turnErrored && !turnInterrupted && finalText) {
-					this.transcript.push({ speaker: agent.visibleName, text: finalText });
-					this.appendRoomEvent({
-						type: "agent_turn",
-						phase: "opening",
-						agent: agent.visibleName,
-						provider: agent.model.provider,
-						model: agent.model.id,
-						text: finalText,
-					});
-				}
-				if (!turnErrored) {
-					this.recordAgentTurnSuccess(agent);
-					this.callbacks.onAgentTurnEnd?.(getAgentInfo(agent), finalText);
-				}
-			}
-
-			const remainingTurns = Math.max(0, MAX_ROOM_TURNS - this.transcript.length);
-			let extraTurnBudget = 0;
-			let forcedResponseTurnsRemaining = 0;
-
-			// If the last opening turn handed the floor off or proposed a write, seed a
-			// forced response so the opening handoff is honored. The opening loop itself
-			// does not gate on turnNeedsRoomResponse, so this catches handoffs declared
-			// during openings (e.g. "your write since you announced intent first").
-			const lastOpeningTurn = this.transcript[this.transcript.length - 1];
-			if (lastOpeningTurn && turnNeedsRoomResponse(lastOpeningTurn.text) && this.getUnsuppressedAgentCount() > 1) {
-				this.appendRoomEvent({
-					type: "room_response_required",
-					reason: "opening_handoff",
-					agent: lastOpeningTurn.speaker,
-				});
-				forcedResponseTurnsRemaining = 1;
-				extraTurnBudget++;
-			}
-
-			// Collaboration-style prompts ("both", "together", "debate", "iterate",
-			// "until complete", "Socratic", "without me", etc.) require at least
-			// agents.length * 2 dynamic exchanges before allowing idle. This prevents
-			// the N=2 scheduler degeneracy where a single pass ends the room.
-			const minDynamicExchanges = isCollaborationPrompt(this.currentHumanPrompt)
-				? Math.min(this.getUnsuppressedAgentCount() * 2, remainingTurns)
-				: MIN_DYNAMIC_TURNS_AFTER_OPENING;
-			if (minDynamicExchanges > MIN_DYNAMIC_TURNS_AFTER_OPENING) {
-				this.appendRoomEvent({
-					type: "collaboration_mode",
-					minDynamicExchanges,
-					agents: this.getUnsuppressedAgentCount(),
-				});
-			}
-
-			for (let dynamicTurnIndex = 0; dynamicTurnIndex < remainingTurns + extraTurnBudget; dynamicTurnIndex++) {
-				if (this.roomHalted || this.getUnsuppressedAgentCount() === 0) {
-					break;
-				}
-				const isRespondingToOpenQuestion = forcedResponseTurnsRemaining > 0;
-				this.callbacks.onStatus?.(
-					isRespondingToOpenQuestion
-						? "Waiting for the room to answer the open question."
-						: "Listening for who wants the floor.",
-				);
-				let next = await this.chooseNextTurn(this.transcript.length);
-
-				// If the chooser returns idle while a response is required or before the
-				// collaboration minimum has been met, force-pick the non-last-speaker so
-				// the room keeps moving instead of silently stopping.
-				const mustContinue = isRespondingToOpenQuestion || dynamicTurnIndex < minDynamicExchanges;
-				if (next.action === "idle" && mustContinue) {
-					const lastSpeakerId = this.getLastSpeakerId();
-					const fallback =
-						this.activeAgents().find((a) => a.definition.id !== lastSpeakerId) ?? this.activeAgents()[0];
-					if (fallback) {
-						this.appendRoomEvent({
-							type: "forced_continuation",
-							reason: isRespondingToOpenQuestion
-								? "response_required_after_handoff"
-								: "below_minimum_collaboration_exchanges",
-							minDynamicExchanges,
-							dynamicTurnIndex,
-							agent: fallback.visibleName,
-							provider: fallback.model.provider,
-							model: fallback.model.id,
-						});
-						next = { action: "speak" as const, agent: fallback, kind: "add" as const };
-					}
-				}
-
-				if (next.action === "idle") {
-					break;
-				}
-				const agent = next.agent;
-				const canClose = !isRespondingToOpenQuestion && dynamicTurnIndex >= minDynamicExchanges;
-				const requestedKind = next.action === "finish" ? "final" : next.kind;
-				const kind = isRespondingToOpenQuestion
-					? "synthesize"
-					: requestedKind === "final" && canClose
-						? "final"
-						: "synthesize";
-				const phase = isRespondingToOpenQuestion ? "response" : kind === "final" ? "closing" : "discussion";
-
-				this.callbacks.onAgentTurnStart?.(getAgentInfo(agent));
-				let finalText = "";
-				let turnErrored = false;
-				let turnInterrupted = false;
-				try {
-					const result = await this.promptAgentWithInterrupts(
-						agent,
-						this.buildPromptForAgent(agent, kind, phase),
+						this.buildPromptForAgent(agent, phase),
 						this.getImagesForAgentPrompt(agent),
 					);
 					if (result.status === "interrupted") {
 						turnInterrupted = true;
 						finalText = this.recordInterruptedTurn(agent, phase, result);
 					} else {
-						finalText = result.text;
+						// Some providers report a failed turn without throwing: prompt()
+						// resolves but the last assistant message carries stopReason
+						// "error"/"aborted" and no content. Surface it as a real failure
+						// instead of silently treating it as an (empty) completed turn.
+						const lastMessage = getLastAssistantMessage(agent.session);
+						const stop = lastMessage?.stopReason;
+						if (stop === "error" || stop === "aborted") {
+							turnErrored = true;
+							const message = lastMessage?.errorMessage || `${agent.visibleName} turn reported stopReason "${stop}"`;
+							this.recordAgentTurnError(agent, phase, new Error(message));
+						} else {
+							const parsed = parseControlTrailer(result.text, activeAgentIds);
+							finalText = parsed.visibleText;
+							// A turn with no visible contribution does not earn the floor
+							// again: treat it as a yield so the scheduler moves on.
+							trailer = finalText ? parsed.trailer : { ...ABSENT_TRAILER };
+						}
 					}
 				} catch (error) {
 					turnErrored = true;
-					finalText = getLastAssistantText(agent.session);
+					const parsed = parseControlTrailer(getLastAssistantText(agent.session), activeAgentIds);
+					finalText = parsed.visibleText;
 					this.recordAgentTurnError(agent, phase, error, finalText);
-					// TODO(phase-5): consult policy.onAgentError. Default is continue.
 				}
+
 				if (!turnErrored && !turnInterrupted && finalText) {
 					this.transcript.push({ speaker: agent.visibleName, text: finalText });
 					this.appendRoomEvent({
@@ -1464,32 +1280,23 @@ Decide if you need to interrupt them immediately.`;
 						provider: agent.model.provider,
 						model: agent.model.id,
 						text: finalText,
+						trailer,
 					});
 				}
+
+				// Record the standing trailer the scheduler reads next. Only a cleanly
+				// completed turn carries a meaningful signal; interrupted/errored turns
+				// reset to absent so the agent is not auto-selected (it can still be
+				// nominated by a peer's handoff).
+				this.standingTrailers.set(
+					agent.definition.id,
+					!turnErrored && !turnInterrupted ? trailer : { ...ABSENT_TRAILER },
+				);
+				lastSpeakerId = agent.definition.id;
+
 				if (!turnErrored) {
 					this.recordAgentTurnSuccess(agent);
 					this.callbacks.onAgentTurnEnd?.(getAgentInfo(agent), finalText);
-				}
-
-				if (isRespondingToOpenQuestion) {
-					forcedResponseTurnsRemaining--;
-				}
-
-				const needsRoomResponse = finalText ? turnNeedsRoomResponse(finalText) : false;
-				if (needsRoomResponse && this.getUnsuppressedAgentCount() > 1 && extraTurnBudget < MAX_OPEN_QUESTION_RESPONSE_TURNS) {
-					this.appendRoomEvent({
-						type: "room_response_required",
-						reason: "open_question_or_write_intent",
-						agent: agent.visibleName,
-						provider: agent.model.provider,
-						model: agent.model.id,
-					});
-					extraTurnBudget++;
-					forcedResponseTurnsRemaining = Math.max(forcedResponseTurnsRemaining, 1);
-				}
-
-				if (kind === "final" && !needsRoomResponse) {
-					break;
 				}
 			}
 		} finally {

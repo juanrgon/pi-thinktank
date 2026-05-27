@@ -47,6 +47,13 @@ export interface ThinktankAgentMessageLike {
 	readonly content:
 		| string
 		| ReadonlyArray<{ readonly type: string; readonly text?: string }>;
+	/**
+	 * Present on assistant messages. Some providers report a failed turn by
+	 * recording an assistant message with stopReason "error"/"aborted" instead
+	 * of throwing from prompt(); the runtime inspects this to surface the failure.
+	 */
+	readonly stopReason?: string;
+	readonly errorMessage?: string;
 }
 
 // ============================================================================

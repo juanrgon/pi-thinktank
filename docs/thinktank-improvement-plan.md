@@ -114,7 +114,14 @@ The ordering is intentional: **trust → governed autonomy → maintainability**
 
 **Acceptance:** Phase 1's `agent_error` events still flow correctly. Tool-call correlation works under a synthetic test with 100 concurrent tool calls. No transcript format change.
 
-### Phase 1.75 — Turn-continuation policy (shipped 2026-05-26)
+### Phase 1.75 — Turn-continuation policy (shipped 2026-05-26, superseded 2026-05-27)
+
+> **Superseded by [ADR 0002](adr/0002-trailer-based-speaker-routing.md).** The
+> impulse-poll scheduler and every stall band-aid described below
+> (`turnNeedsRoomResponse`, `isCollaborationPrompt`, `minDynamicExchanges`,
+> forced continuation, `turn_impulse_poll`/`collaboration_mode`/`forced_continuation`
+> events) were removed and replaced by deterministic trailer-based speaker routing.
+> This section is retained as history.
 
 **Goal:** prevent collaborative rooms from going idle immediately after opening turns.
 

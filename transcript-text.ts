@@ -3,7 +3,6 @@
 // Extracted from room-runtime.ts so the truncation behavior is testable
 // without loading the full Pi runtime graph. Used by:
 //   - the visible-turn prompt builder (no limit; full transcript)
-//   - chooseNextTurn's impulse poll (limit: 20; bounds hidden-completion cost)
 //   - pollForInterruptions (limit: 2; only last exchange matters)
 //
 // This file intentionally has no external dependencies.

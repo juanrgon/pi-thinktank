@@ -14,6 +14,7 @@ import {
 import { Box, type Component, Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import type { ClassifiedAgentError } from "./agent-error.ts";
 import { defaultRuntimeDeps } from "./runtime-default-deps.ts";
+import { parseControlTrailer } from "./control-trailer.ts";
 import {
 	type AgentTurnPhase,
 	getThinktankLabSessionRoot,
@@ -286,8 +287,13 @@ function extractLiveStateFromAssistantMessage(
 		}
 	}
 
+	// Hide the CONTROL routing trailer from the live stream. parseControlTrailer
+	// strips both a completed trailer and an in-progress one (a dangling
+	// "CONTROL:" with no closed JSON yet), so the user never sees control syntax.
+	const visibleText = parseControlTrailer(textParts.join("\n\n")).visibleText;
+
 	return {
-		text: tailText(textParts.join("\n\n"), LIVE_TEXT_LIMIT),
+		text: tailText(visibleText, LIVE_TEXT_LIMIT),
 		thinking: tailText(thinkingParts.join("\n\n"), LIVE_THINKING_LIMIT),
 		toolCalls,
 	};
