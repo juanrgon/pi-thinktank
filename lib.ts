@@ -29,6 +29,8 @@ export {
 	type PrecompactionDecision,
 	type PrecompactionDecisionReason,
 	type PrecompactionSettings,
+	type RoomIdleReason,
+	type RoomIdleSummary,
 	type ThinktankAgentTurnError,
 	type ThinktankLabSessionInfo,
 	type ThinktankRoomAgentInfo,

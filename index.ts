@@ -20,6 +20,7 @@ import {
 	getThinktankLabSessionRoot,
 	getThinktankRoomSessionDir,
 	getThinktankTranscriptPath,
+	type RoomIdleSummary,
 	type ThinktankLabSessionInfo,
 	type ThinktankRoomAgentInfo,
 	ThinktankRoomRuntime,
@@ -297,6 +298,55 @@ function extractLiveStateFromAssistantMessage(
 		thinking: tailText(thinkingParts.join("\n\n"), LIVE_THINKING_LIMIT),
 		toolCalls,
 	};
+}
+
+function formatRoomIdle(summary: RoomIdleSummary): { title: string; text: string; status: string } {
+	const turns = `${summary.turns} turn${summary.turns === 1 ? "" : "s"}`;
+	const yourTurn = "\n\n**Your turn** — reply to continue the room, or `/thinktank off` to stop.";
+	switch (summary.reason) {
+		case "consensus":
+			return {
+				title: "✓ Room reached consensus",
+				text: `The agents agreed the discussion is complete after ${turns}.${yourTurn}`,
+				status: "Thinktank: consensus · your turn",
+			};
+		case "converged":
+			return {
+				title: "✓ Room settled",
+				text: `No agent had more to add after ${turns}.${yourTurn}`,
+				status: "Thinktank: settled · your turn",
+			};
+		case "turn_limit":
+			return {
+				title: "⏸ Room paused — turn limit reached",
+				text: `The room hit its turn budget after ${turns} without converging.${yourTurn}`,
+				status: "Thinktank: paused (turn limit) · your turn",
+			};
+		case "halted":
+			return {
+				title: "⚠ Room halted — repeated agent failures",
+				text: `The last active agent kept failing after ${turns}; see the error(s) above.${yourTurn}`,
+				status: "Thinktank: halted · your turn",
+			};
+		case "all_suppressed":
+			return {
+				title: "⚠ Room idle — all agents suppressed",
+				text: `Every agent was suppressed after repeated failures.${yourTurn}`,
+				status: "Thinktank: idle (suppressed) · your turn",
+			};
+		case "no_active_agents":
+			return {
+				title: "Room idle — no active agents",
+				text: "No enabled agents are available. Use `/roster` to enable models, or `/login`.",
+				status: "Thinktank: idle (no agents)",
+			};
+		default:
+			return {
+				title: "Room idle",
+				text: `The room is idle after ${turns}.${yourTurn}`,
+				status: "Thinktank: idle · your turn",
+			};
+	}
 }
 
 function formatAgentTurnErrorText(error: ClassifiedAgentError & { partialText?: string }): string {
@@ -759,11 +809,18 @@ export default function (pi: ExtensionAPI) {
 			onAgentEvent(agent: ThinktankRoomAgentInfo, _session: unknown, event: ThinktankSessionEventLike): void {
 				handleAgentEvent(agent, event);
 			},
-			onRoomIdle(): void {
-				ctx.ui.setStatus("thinktank-active", undefined);
+			onRoomIdle(summary: RoomIdleSummary): void {
+				const idle = formatRoomIdle(summary);
+				ctx.ui.setStatus("thinktank-active", idle.status);
 				ctx.ui.setWorkingMessage();
 				ctx.ui.setWorkingVisible(false);
 				updateLiveState({ visible: false, status: "", agent: undefined, text: "", thinking: "", toolCalls: [] });
+				send({
+					kind: "status",
+					title: idle.title,
+					text: idle.text,
+					transcriptFile: room?.transcriptFile,
+				});
 				if (pendingRosterApply) {
 					void applyRosterToRoom(ctx).catch((error: unknown) => {
 						ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");

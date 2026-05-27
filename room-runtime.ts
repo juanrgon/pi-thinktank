@@ -107,6 +107,22 @@ export interface ThinktankRoomAgentInfo {
 
 export type AgentTurnPhase = "opening" | "discussion" | "closing" | "response";
 
+/** Why a room run ended, surfaced to the UI so idle/consensus is legible. */
+export type RoomIdleReason =
+	| "consensus"
+	| "converged"
+	| "turn_limit"
+	| "halted"
+	| "all_suppressed"
+	| "no_active_agents"
+	| "internal";
+
+export interface RoomIdleSummary {
+	reason: RoomIdleReason;
+	turns: number;
+	lastSpeaker?: string;
+}
+
 export interface ThinktankAgentTurnError extends ClassifiedAgentError {
 	partialText?: string;
 }
@@ -126,7 +142,7 @@ export interface ThinktankRoomCallbacks {
 		interrupter: ThinktankRoomAgentInfo | "user" | "runtime",
 		reason: string,
 	): void;
-	onRoomIdle?(): void;
+	onRoomIdle?(summary: RoomIdleSummary): void;
 }
 
 interface ActiveRoomTurn {
@@ -1244,6 +1260,7 @@ Decide if you need to interrupt them immediately.`;
 			imageCount: images.length,
 			roster: this.agents.map((agent) => getAgentInfo(agent)),
 		});
+		let endReason: RoomIdleReason = "turn_limit";
 		try {
 			const initialActiveCount = Math.max(1, this.getUnsuppressedAgentCount());
 			const maxTurns = Math.min(MAX_ROOM_TURNS, this.maxRounds * initialActiveCount);
@@ -1256,7 +1273,12 @@ Decide if you need to interrupt them immediately.`;
 			let lastSpeakerId: LabId | undefined;
 
 			for (let turnIndex = 0; turnIndex < maxTurns; turnIndex++) {
-				if (this.roomHalted || this.getUnsuppressedAgentCount() === 0) {
+				if (this.roomHalted) {
+					endReason = "halted";
+					break;
+				}
+				if (this.getUnsuppressedAgentCount() === 0) {
+					endReason = "all_suppressed";
 					break;
 				}
 
@@ -1269,11 +1291,18 @@ Decide if you need to interrupt them immediately.`;
 				});
 				this.appendRoomEvent({ type: "turn_selection", turnIndex, decision });
 				if (decision.action === "stop") {
+					endReason =
+						decision.reason === "all_done"
+							? "consensus"
+							: decision.reason === "converged"
+								? "converged"
+								: "no_active_agents";
 					break;
 				}
 
 				const agent = this.agents.find((candidate) => candidate.definition.id === decision.agentId);
 				if (!agent) {
+					endReason = "internal";
 					break;
 				}
 				const phase: AgentTurnPhase = decision.reason === "opening" ? "opening" : "discussion";
@@ -1352,7 +1381,13 @@ Decide if you need to interrupt them immediately.`;
 			}
 		} finally {
 			this.running = false;
-			this.callbacks.onRoomIdle?.();
+			const idleSummary: RoomIdleSummary = {
+				reason: endReason,
+				turns: this.transcript.length,
+				lastSpeaker: this.transcript[this.transcript.length - 1]?.speaker,
+			};
+			this.appendRoomEvent({ type: "room_idle", ...idleSummary });
+			this.callbacks.onRoomIdle?.(idleSummary);
 		}
 	}
 }

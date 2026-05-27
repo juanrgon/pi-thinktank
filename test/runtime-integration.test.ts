@@ -192,6 +192,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		});
 		const deps = new FakeRuntimeDeps();
 		const endedTurns: string[] = [];
+		let idleReason: string | undefined;
 
 		const room = new ThinktankRoomRuntime({
 			services,
@@ -200,6 +201,9 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			rosterSelections: {},
 			callbacks: {
 				onAgentTurnEnd: (agent, text) => endedTurns.push(`${agent.id}:${text}`),
+				onRoomIdle: (summary) => {
+					idleReason = summary.reason;
+				},
 			},
 		});
 		await room.ready();
@@ -250,6 +254,11 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			selections.some((event) => event.decision?.action === "stop" && event.decision?.reason === "all_done"),
 			"the room should stop via the all_done consensus",
 		);
+		// The idle summary must report consensus, and a room_idle event must be logged.
+		assert.equal(idleReason, "consensus");
+		const idleEvents = roomEvents.filter((event) => (event as { type?: string }).type === "room_idle");
+		assert.equal(idleEvents.length, 1);
+		assert.equal((idleEvents[0] as { reason?: string }).reason, "consensus");
 
 		room.dispose();
 	});
