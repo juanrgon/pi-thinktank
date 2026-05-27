@@ -82,6 +82,97 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		room.dispose();
 	});
 
+	test("agent suppressed after two same-category failures inside one collaborative prompt", async () => {
+		// Two enabled labs so the failing one can be suppressed rather than
+		// triggering the last-agent halt path.
+		const services = new FakeServices({
+			models: [
+				createFakeModel({
+					provider: "github-copilot",
+					id: "gpt-5.5",
+					name: "GPT-5.5",
+				}),
+				createFakeModel({
+					provider: "anthropic",
+					id: "claude-opus-4.7",
+					name: "Claude Opus 4.7",
+				}),
+			],
+		});
+		const deps = new FakeRuntimeDeps();
+		const errorEvents: { id: string; category: string }[] = [];
+
+		const room = new ThinktankRoomRuntime({
+			services,
+			deps,
+			cwd: `/tmp/thinktank-f4-suppress-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			rosterSelections: {},
+			callbacks: {
+				onAgentTurnError: (agent, _phase, error) => {
+					errorEvents.push({ id: agent.id, category: error.category });
+				},
+			},
+		});
+		await room.ready();
+
+		assert.equal(deps.createdSessions.length, 2);
+		const openaiIdx = deps.createLabSessionCalls.findIndex((c) => c.model.provider === "github-copilot");
+		const anthropicIdx = deps.createLabSessionCalls.findIndex((c) => c.model.provider === "anthropic");
+		assert.ok(openaiIdx >= 0 && anthropicIdx >= 0, "both labs should have session-create calls");
+		const openaiSession = deps.createdSessions[openaiIdx];
+		const anthropicSession = deps.createdSessions[anthropicIdx];
+		assert.ok(openaiSession && anthropicSession);
+
+		// Script openai to fail with the same error category every time.
+		// "503" classifies as provider_error in agent-error.ts. Queue many
+		// errors; only the first two should actually be consumed because the
+		// second failure triggers suppression for the rest of the prompt.
+		const providerError = new Error("503 Service Unavailable from provider");
+		for (let i = 0; i < 5; i++) {
+			openaiSession.queuePromptScript({ kind: "error", error: providerError });
+		}
+
+		// Script anthropic to succeed many times so the dynamic phase has
+		// something to keep doing while the room satisfies the collaboration
+		// minimum exchange floor.
+		for (let i = 0; i < 8; i++) {
+			anthropicSession.queuePromptMessage(`anthropic reply ${i + 1}`);
+		}
+
+		// Use a collaboration-style human prompt so isCollaborationPrompt fires
+		// and minDynamicExchanges = agents.length * 2 = 4. The forced_continuation
+		// fallback will then re-pick openai during the dynamic phase even after
+		// its opening turn failed, giving it a second chance to fail and trip
+		// the suppression threshold.
+		await room.submitHumanPrompt("please iterate on this together");
+
+		// Suppression triggers after the SECOND same-category failure. Once it
+		// trips, activeAgents() filters openai out, so subsequent turns can
+		// only be assigned to anthropic. Therefore openai's prompt() should
+		// have been called exactly twice, not more.
+		assert.equal(
+			openaiSession.promptCalls.length,
+			2,
+			`openai should have been called exactly twice (opening + one forced-continuation) before suppression; recorded: ${openaiSession.promptCalls.length}`,
+		);
+
+		// Anthropic should have been called several times: opening turn +
+		// one or more dynamic turns once openai is out of the pool.
+		assert.ok(
+			anthropicSession.promptCalls.length >= 3,
+			`anthropic should have been called at least 3 times; recorded: ${anthropicSession.promptCalls.length}`,
+		);
+
+		// Both errors should have been classified the same way (provider_error)
+		// for suppression to fire. If classify drifted, this catches it.
+		const openaiErrors = errorEvents.filter((e) => e.id === "openai");
+		assert.equal(openaiErrors.length, 2, "expected exactly two openai errors");
+		assert.equal(openaiErrors[0]?.category, "provider_error");
+		assert.equal(openaiErrors[1]?.category, "provider_error");
+
+		room.dispose();
+	});
+
 	test("submitHumanPrompt drives an opening turn on the only enabled agent", async () => {
 		const services = new FakeServices({
 			models: [
