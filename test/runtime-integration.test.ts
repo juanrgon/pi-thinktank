@@ -18,6 +18,7 @@ import {
 	createFakeModel,
 	FakeRuntimeDeps,
 	FakeServices,
+	FakeSession,
 } from "./_fakes/runtime-deps.ts";
 
 describe("ThinktankRoomRuntime integration (F4)", () => {
@@ -139,6 +140,69 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			`turn end callback fired with scripted text (events: ${events.join(",")})`,
 		);
 		assert.ok(events.includes("idle"), `room idle callback fired (events: ${events.join(",")})`);
+
+		room.dispose();
+	});
+
+	test("pre-turn compaction runs before prompting an agent near the threshold", async () => {
+		const services = new FakeServices({
+			models: [
+				createFakeModel({
+					provider: "github-copilot",
+					id: "gpt-5.5",
+					name: "GPT-5.5",
+					contextWindow: 128_000,
+				}),
+			],
+		});
+		const deps = new FakeRuntimeDeps();
+		const statuses: string[] = [];
+		const session = new FakeSession({
+			contextUsage: {
+				tokens: 110_000,
+				contextWindow: 128_000,
+			},
+		});
+		deps.nextSessions.push(session);
+
+		const room = new ThinktankRoomRuntime({
+			services,
+			deps,
+			cwd: `/tmp/thinktank-f4-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			rosterSelections: {},
+			callbacks: {
+				onStatus: (status) => statuses.push(status),
+			},
+		});
+		await room.ready();
+
+		// The fake prompt implementation runs this assertion at the moment
+		// session.prompt() is invoked, so it proves compaction already happened.
+		session.queuePromptScript({
+			kind: "run",
+			run: (fakeSession) => {
+				assert.equal(fakeSession.compactCalls.length, 1, "compact() should be called before prompt()");
+				const message = {
+					role: "assistant",
+					content: [{ type: "text", text: "compaction happened first" }],
+				};
+				fakeSession.messages.push(message);
+				fakeSession.emit({ type: "message_end", message });
+			},
+		});
+
+		await room.submitHumanPrompt("simple prompt that should trigger one opening turn");
+
+		assert.equal(session.compactCalls.length, 1, "expected exactly one proactive compaction");
+		assert.equal(session.promptCalls.length, 1, "expected exactly one visible prompt");
+		assert.ok(
+			session.compactCalls[0]?.includes("Summarize this Lab Agent's private Thinktank room-session context"),
+			"precompaction instructions should be passed to compact()",
+		);
+		assert.ok(
+			statuses.some((status) => status.includes("refreshing private context")),
+			`expected user-facing precompaction status (statuses: ${statuses.join(", ")})`,
+		);
 
 		room.dispose();
 	});
