@@ -50,7 +50,9 @@ export const defaultRuntimeDeps: ThinktankRuntimeDeps = {
 	async createLabSession(
 		options: ThinktankCreateLabSessionOptions,
 	): Promise<{ readonly session: ThinktankSessionLike }> {
-		const sessionManager = SessionManager.continueRecent(options.cwd, options.sessionDir);
+		const sessionManager = options.resumeRecentSession
+			? SessionManager.continueRecent(options.cwd, options.sessionDir)
+			: SessionManager.create(options.cwd, options.sessionDir);
 		const created = await createAgentSessionFromServices({
 			// biome-ignore lint/suspicious/noExplicitAny: adapter boundary cast
 			services: options.services as any,

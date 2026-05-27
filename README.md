@@ -46,14 +46,14 @@ Note: write safety is still prompt-based — `edit`, `write`, and `bash` are ava
 
 The room transcript is saved to `~/.ai-thinktank/room-sessions/<sanitized-cwd>/transcript.jsonl` and persists across Pi runs.
 
-Each lab agent also keeps a **private session** under the same directory (`labs/<lab-id>/`), and **resumes its most recent session on every new Pi run in the same working directory**. This means agents may carry forward context, conclusions, and assumptions from prior prompts — even ones from days ago — without that history being visible in the current room transcript.
+Each lab agent keeps a **private session** under the same directory (`labs/<lab-id>/`). By default this memory is **ephemeral**: every Pi run starts each lab from a clean session, so agents do **not** silently carry forward conclusions or assumptions from prior prompts. Within a single run the agents share context across turns (the room is one sitting); that context is dropped when the run ends.
 
-To reset agents to a clean state, remove the persisted directory for your project:
+If you explicitly want agents to resume their most recent prior session for a working directory (carrying memory across runs), construct the room with `labMemory: "persistent"`. This is opt-in because auto-resuming stale private context is a footgun — agents can act on framing you can't see in the current transcript. See [`docs/adr/0004-ephemeral-lab-memory-default.md`](docs/adr/0004-ephemeral-lab-memory-default.md).
+
+To wipe all persisted room state for a project:
 
 ```bash
 rm -rf ~/.ai-thinktank/room-sessions/<sanitized-cwd>/
 ```
 
 The sanitized cwd is your project path with `/` replaced by `-`. List `~/.ai-thinktank/room-sessions/` to find yours.
-
-An in-app `/thinktank memory` command (with `ephemeral`, `persistent`, and `artifact-only` modes) is planned. See [`docs/thinktank-improvement-plan.md`](docs/thinktank-improvement-plan.md) Phase 6 for the full design.

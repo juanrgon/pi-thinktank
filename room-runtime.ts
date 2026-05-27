@@ -343,6 +343,7 @@ export class ThinktankRoomRuntime {
 	private standingTrailers = new Map<LabId, SpeakerTrailer>();
 	private maxRounds: number;
 	private labTools?: readonly string[] | "all";
+	private labMemory: "ephemeral" | "persistent";
 	private roomHalted = false;
 	private currentHumanPrompt = "";
 	private currentHumanImages: ImageContent[] = [];
@@ -370,6 +371,14 @@ export class ThinktankRoomRuntime {
 		 *  - string[]: an explicit allowlist (exactly these tool names).
 		 */
 		labTools?: readonly string[] | "all";
+		/**
+		 * Lab agent private memory:
+		 *  - "ephemeral" (default): each lab starts a fresh session; no prior
+		 *    on-disk session is auto-resumed across Pi runs.
+		 *  - "persistent": resume each lab's most recent session for this cwd
+		 *    (carries context across runs).
+		 */
+		labMemory?: "ephemeral" | "persistent";
 	}) {
 		this.services = options.services;
 		this.deps = options.deps;
@@ -377,6 +386,7 @@ export class ThinktankRoomRuntime {
 		this.callbacks = options.callbacks;
 		this.maxRounds = Math.max(1, options.maxRounds ?? DEFAULT_MAX_ROUNDS);
 		this.labTools = options.labTools;
+		this.labMemory = options.labMemory ?? "ephemeral";
 		this.roomSessionDir = createRoomSessionDir(options.cwd);
 		this.transcriptPath = join(this.roomSessionDir, "transcript.jsonl");
 		this.readyPromise = this.rebuildAgents(options.rosterSelections);
@@ -484,6 +494,7 @@ export class ThinktankRoomRuntime {
 				services: this.services,
 				model,
 				thinkingLevel,
+				resumeRecentSession: this.labMemory === "persistent",
 				...this.resolveLabToolOptions(),
 			});
 

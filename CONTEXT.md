@@ -8,7 +8,7 @@ A model-backed participant in a Thinktank room. A Lab Agent has a lab identity, 
 
 ## Lab session
 
-The private, persistent per-agent context owned by a Lab Agent. Lab sessions live on disk separately from any single room transcript and are the mechanism by which a Lab Agent remembers prior conversations with the human participant. Resetting a lab session is distinct from ending a room.
+The private per-agent context owned by a Lab Agent for a working directory. Lab sessions live on disk under the room-session directory. By default a Lab Agent starts a **fresh** lab session each Pi run (ephemeral memory) and does not auto-resume prior sessions; an opt-in persistent mode resumes the most recent session so memory carries across runs. Resetting or not resuming a lab session is distinct from ending a room.
 
 ## Thinktank room
 

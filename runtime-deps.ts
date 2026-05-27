@@ -282,6 +282,12 @@ export interface ThinktankCreateLabSessionOptions {
 	readonly tools?: ReadonlyArray<string>;
 	/** Tool names to exclude from the full set when `tools` is omitted. */
 	readonly excludeTools?: ReadonlyArray<string>;
+	/**
+	 * When true, resume the lab's most recent on-disk session for this cwd
+	 * (carries private memory across Pi runs). When false/omitted, start a fresh
+	 * session each time. Default behavior is fresh.
+	 */
+	readonly resumeRecentSession?: boolean;
 }
 
 /**

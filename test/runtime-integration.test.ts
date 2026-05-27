@@ -620,6 +620,35 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		assert.deepEqual([...(all.excludeTools ?? [])], []);
 	});
 
+	test("lab memory is ephemeral by default and resumes only when persistent", async () => {
+		const capture = async (labMemory?: "ephemeral" | "persistent") => {
+			const services = new FakeServices({
+				models: [createFakeModel({ provider: "github-copilot", id: "gpt-5.5" })],
+			});
+			const deps = new FakeRuntimeDeps();
+			const room = new ThinktankRoomRuntime({
+				services,
+				deps,
+				cwd: `/tmp/thinktank-labmem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+				rosterSelections: {},
+				labMemory,
+				callbacks: {},
+			});
+			await room.ready();
+			const call = deps.createLabSessionCalls[0];
+			room.dispose();
+			assert.ok(call);
+			return call;
+		};
+
+		// Default: do NOT auto-resume a prior session.
+		assert.notEqual((await capture()).resumeRecentSession, true);
+		// Explicit persistent opt-in resumes.
+		assert.equal((await capture("persistent")).resumeRecentSession, true);
+		// Explicit ephemeral does not.
+		assert.notEqual((await capture("ephemeral")).resumeRecentSession, true);
+	});
+
 	test("a non-throwing provider error (stopReason=error) is surfaced, not silently swallowed", async () => {
 		// Reproduces the real claude-opus-4.7 case found in manual testing: the
 		// provider returns an assistant message with stopReason "error" and empty
