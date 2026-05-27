@@ -68,9 +68,9 @@ export const THINKTANK_LAB_DEFINITIONS: ThinktankLabDefinition[] = [
 		displayName: "Opus 4.7",
 		shortName: "Anthropic",
 		providerCandidates: ["anthropic", "github-copilot"],
-		preferredModelIds: ["claude-opus-4.7", "claude-opus-4-7", "claude-opus-4.6", "claude-opus-4.5"],
+		preferredModelIds: ["claude-quiche-eap", "claude-opus-4.7", "claude-opus-4-7", "claude-opus-4.6", "claude-opus-4.5"],
 		displayModelIds: ["claude-opus-4.7", "claude-opus-4-7"],
-		modelIdNeedles: ["claude-opus-4-7", "claude-opus-4.7", "opus-4-7", "opus-4.7", "opus"],
+		modelIdNeedles: ["claude-opus-4-7", "claude-opus-4.7", "opus-4-7", "opus-4.7", "opus", "claude"],
 	},
 ];
 
