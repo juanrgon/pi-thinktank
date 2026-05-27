@@ -57,3 +57,11 @@ rm -rf ~/.ai-thinktank/room-sessions/<sanitized-cwd>/
 ```
 
 The sanitized cwd is your project path with `/` replaced by `-`. List `~/.ai-thinktank/room-sessions/` to find yours.
+
+### State shared across pi sessions
+
+Lab agent **conversational context is never shared between pi sessions** in the default (ephemeral) mode: each room starts its agents fresh, and no session reads another session's discussion. A few on-disk artifacts are shared, but none of them feed back into what the models see:
+
+- **Global config** — `~/.ai-thinktank/settings.json` holds the roster and the on/off flag and is shared by *every* pi session regardless of working directory. Changing the roster or toggling `/thinktank on|off` in one session affects the others the next time they read it.
+- **Room transcript** — `transcript.jsonl` is keyed by working directory and append-only. Two rooms running in the **same** directory at once will interleave their events into that one log file, but the runtime never reads it back into a room, so it does not leak into either conversation. Different directories never collide.
+- **`labMemory: "persistent"`** is the one exception: it resumes the most recent lab session for a working directory, which can belong to another session. That cross-session carryover is exactly why persistent mode is opt-in.
