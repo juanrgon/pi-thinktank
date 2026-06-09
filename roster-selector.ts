@@ -120,7 +120,7 @@ export class RosterSelectorComponent extends Container implements Focusable {
 				rawKeyHint("←→", "effort"),
 				keyHint("tui.input.tab", "agent"),
 				rawKeyHint("+", "add"),
-				rawKeyHint("Delete", "remove"),
+				rawKeyHint("Ctrl+X", "remove"),
 				rawKeyHint("Space", "enable/disable"),
 				keyHint("tui.select.confirm", this.activeEntry ? "set model" : "add"),
 				keyHint("tui.select.cancel", "close"),
@@ -322,7 +322,7 @@ export class RosterSelectorComponent extends Container implements Focusable {
 			this.addCurrentModel();
 			return;
 		}
-		if (this.searchInput.getValue() === "" && matchesKey(data, Key.delete)) {
+		if (matchesKey(data, Key.ctrl("x"))) {
 			this.removeActiveAgent();
 			return;
 		}
