@@ -3,6 +3,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 
 /** Stable identity for one participant in the room. */
 export type AgentId = string;
+export type ThinktankAgentRole = "leader" | "advisor";
 /** @deprecated Use AgentId. */
 export type LabId = AgentId;
 
@@ -12,6 +13,7 @@ export interface ThinktankAgentRosterSelection {
 	model: string;
 	thinkingLevel?: ThinkingLevel;
 	disabled?: boolean;
+	role?: ThinktankAgentRole;
 }
 
 export type ThinktankAgentRosterSelections = ThinktankAgentRosterSelection[];
@@ -30,6 +32,7 @@ export interface ThinktankRosterEntry {
 	model: Model<Api>;
 	thinkingLevel: ThinkingLevel;
 	disabled?: boolean;
+	role?: ThinktankAgentRole;
 }
 
 export type ThinktankRoster = ThinktankRosterEntry[];
@@ -81,6 +84,7 @@ export function selectThinktankRosterEntry(
 		model,
 		thinkingLevel: clampLevel ? clampLevel(model, requestedLevel) : requestedLevel,
 		disabled: selection.disabled,
+		role: selection.role,
 	};
 }
 

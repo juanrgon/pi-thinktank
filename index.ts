@@ -22,6 +22,8 @@ import {
 	getThinktankTranscriptPath,
 	type RoomIdleSummary,
 	type ThinktankLabSessionInfo,
+	type ThinktankRoomMode,
+	type TurnPresentation,
 	type ThinktankRoomAgentInfo,
 	ThinktankRoomRuntime,
 } from "./room-runtime.ts";
@@ -46,6 +48,8 @@ type ThinktankMessageKind = "roster" | "human" | "agent" | "tool" | "status" | "
 interface ThinktankSettings {
 	enabled?: boolean;
 	roster?: unknown;
+	roomMode?: ThinktankRoomMode;
+	leaderLedMaxTurns?: number;
 }
 
 interface ThinktankToolMessage {
@@ -118,7 +122,7 @@ function writeThinktankSettings(settings: ThinktankSettings): void {
 }
 
 function readThinktankEnabled(): boolean {
-	return readThinktankSettings().enabled ?? true;
+	return readThinktankSettings().enabled ?? false;
 }
 
 function persistThinktankEnabled(enabled: boolean): void {
@@ -145,6 +149,7 @@ function readSavedRosterSelections(): ThinktankAgentRosterSelections {
 			model: entry.model,
 			thinkingLevel: normalizeThinkingLevel(entry.thinkingLevel),
 			disabled: entry.disabled === true,
+			role: entry.role === "leader" || entry.role === "advisor" ? entry.role : undefined,
 		});
 	}
 
@@ -159,8 +164,23 @@ function persistRosterSelections(roster: ThinktankRoster): void {
 		model: entry.model.id,
 		thinkingLevel: entry.thinkingLevel,
 		disabled: entry.disabled,
+		role: entry.role,
 	}));
 	writeThinktankSettings({ ...settings, roster: saved });
+}
+
+function resolveRoomMode(roster: ThinktankRoster): ThinktankRoomMode {
+	const saved = readThinktankSettings().roomMode;
+	if (saved === "leader-led" || saved === "debate") return saved;
+	return roster.some((entry) => !entry.disabled && entry.role === "leader") ? "leader-led" : "debate";
+}
+
+function persistRoomMode(roomMode: ThinktankRoomMode): void {
+	writeThinktankSettings({ ...readThinktankSettings(), roomMode });
+}
+
+function hasValidLeader(roster: ThinktankRoster): boolean {
+	return roster.filter((entry) => !entry.disabled && entry.role === "leader").length === 1;
 }
 
 function refreshAvailableModels(ctx: ExtensionContext): Model<Api>[] {
@@ -177,13 +197,14 @@ function formatRoster(roster: ThinktankRoster): string {
 		return "no agents";
 	}
 	return roster
-		.map((entry, index) => `${index + 1}: ${entry.disabled ? "disabled " : ""}${getThinktankRosterEntryReference(entry)}`)
+		.map((entry, index) => `${index + 1}: ${entry.role === "leader" ? "leader " : "advisor "}${entry.disabled ? "disabled " : ""}${getThinktankRosterEntryReference(entry)}`)
 		.join(" | ");
 }
 
 function formatLabSessionInfo(info: ThinktankLabSessionInfo): string {
 	const configured = info.provider && info.model ? `${info.provider}/${info.model}:${info.thinkingLevel}` : "not configured";
-	const status = info.active ? `${info.visibleName ?? info.lab} (${configured})` : configured;
+	const role = info.role ? `${info.role}; ` : "";
+	const status = info.active ? `${info.visibleName ?? info.lab} (${role}${configured})` : `${role}${configured}`;
 	const sessionFile = info.sessionFile ? `\n  session file: \`${info.sessionFile}\`` : "";
 	return `- **${info.lab}**: ${status}\n  directory: \`${info.sessionDir}\`${sessionFile}`;
 }
@@ -201,6 +222,7 @@ function formatThinktankSessions(ctx: ExtensionContext, activeRoom: ThinktankRoo
 			provider: entry.model.provider,
 			model: entry.model.id,
 			thinkingLevel: entry.thinkingLevel,
+			role: entry.role,
 			sessionDir: join(labSessionRoot, `agent-${entry.id.replace(/[^a-zA-Z0-9._-]/g, "-") || "unnamed"}`),
 		}));
 
@@ -326,10 +348,22 @@ function formatRoomIdle(summary: RoomIdleSummary): { title: string; text: string
 				text: `No agent had more to add after ${turns}.${yourTurn}`,
 				status: "Thinktank: settled · your turn",
 			};
+		case "leader_final":
+			return {
+				title: "✓ Leader finished",
+				text: `The leader completed the request after ${turns}.${yourTurn}`,
+				status: "Thinktank: leader finished · your turn",
+			};
+		case "leader_unavailable":
+			return {
+				title: "⚠ Leader unavailable",
+				text: `The configured leader could not complete the room. Select a leader or switch to debate mode.${yourTurn}`,
+				status: "Thinktank: leader unavailable · your turn",
+			};
 		case "turn_limit":
 			return {
 				title: "⏸ Room paused — turn limit reached",
-				text: `The room hit its turn budget after ${turns} without converging.${yourTurn}`,
+				text: `The room hit its turn budget after ${turns} without a final answer.${yourTurn}`,
 				status: "Thinktank: paused (turn limit) · your turn",
 			};
 		case "halted":
@@ -600,7 +634,12 @@ export default function (pi: ExtensionAPI) {
 		}
 		const currentRoster = roster ?? resolveRoster(ctx);
 		roster = currentRoster;
-		ctx.ui.setStatus("thinktank-roster", `Thinktank: on | ${formatRoster(currentRoster)}`);
+		const mode = resolveRoomMode(currentRoster);
+		const leader = currentRoster.find((entry) => !entry.disabled && entry.role === "leader");
+		const modeStatus = mode === "leader-led"
+			? `leader-led | Leader: ${leader ? getThinktankRosterEntryReference(leader) : "not configured"}`
+			: "debate";
+		ctx.ui.setStatus("thinktank-roster", `Thinktank: on | ${modeStatus} | ${formatRoster(currentRoster)}`);
 	}
 
 	function setThinktankEnabled(ctx: ExtensionContext, enabled: boolean): void {
@@ -651,17 +690,42 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		pendingRosterApply = false;
+		room.setMode(resolveRoomMode(roster));
 		await room.setRoster(roster);
 		updateRosterStatus(ctx);
+	}
+
+	function isLeaderLedRoom(): boolean {
+		return room?.mode === "leader-led";
+	}
+
+	function budgetSuffix(): string {
+		return liveState.status.match(/ · \d+\/\d+$/)?.[0] ?? "";
+	}
+
+	function toolActivity(agent: ThinktankRoomAgentInfo, toolName: string, args: unknown): string {
+		const path = isObject(args) && typeof args.path === "string" ? args.path.slice(0, 120) : undefined;
+		const budget = budgetSuffix();
+		if (path && toolName === "read") return `${agent.visibleName} reading ${path}…${budget}`;
+		if (path && (toolName === "edit" || toolName === "write")) return `${agent.visibleName} editing ${path}…${budget}`;
+		return `${agent.visibleName} running ${toolName}…${budget}`;
+	}
+
+	function shouldDisplayTool(agent: ThinktankRoomAgentInfo, toolName: string, isError = false): boolean {
+		if (!isLeaderLedRoom()) return true;
+		if (isError) return true;
+		return agent.role === "leader" && !new Set(["read", "grep", "find", "ls"]).has(toolName);
 	}
 
 	function handleAgentEvent(agent: ThinktankRoomAgentInfo, event: ThinktankSessionEventLike): void {
 		if (event.type === "message_update" && event.message.role === "assistant") {
 			updateLiveState({
 				visible: true,
-				status: `${agent.visibleName} is streaming`,
+				status: `${agent.visibleName} replying…${budgetSuffix()}`,
 				agent,
-				...extractLiveStateFromAssistantMessage(event.message),
+				...(isLeaderLedRoom()
+					? { text: "", thinking: "", toolCalls: [] }
+					: extractLiveStateFromAssistantMessage(event.message)),
 			});
 			return;
 		}
@@ -669,40 +733,44 @@ export default function (pi: ExtensionAPI) {
 		if (event.type === "tool_execution_start") {
 			updateLiveState({
 				visible: true,
-				status: `${agent.visibleName} is running ${event.toolName}`,
+				status: toolActivity(agent, event.toolName, event.args),
 				agent,
 			});
-			send({
-				kind: "tool",
-				tool: {
-					agent,
-					phase: "start",
-					toolCallId: event.toolCallId,
-					toolName: event.toolName,
-					args: event.args,
-				},
-			});
+			if (shouldDisplayTool(agent, event.toolName)) {
+				send({
+					kind: "tool",
+					tool: {
+						agent,
+						phase: "start",
+						toolCallId: event.toolCallId,
+						toolName: event.toolName,
+						args: event.args,
+					},
+				});
+			}
 			return;
 		}
 
 		if (event.type === "tool_execution_end") {
 			updateLiveState({
 				visible: true,
-				status: `${agent.visibleName} finished ${event.toolName}`,
+				status: `${agent.visibleName} finished ${event.toolName}${budgetSuffix()}`,
 				agent,
 				toolCalls: [],
 			});
-			send({
-				kind: "tool",
-				tool: {
-					agent,
-					phase: "end",
-					toolCallId: event.toolCallId,
-					toolName: event.toolName,
-					result: event.result,
-					isError: event.isError,
-				},
-			});
+			if (shouldDisplayTool(agent, event.toolName, event.isError === true)) {
+				send({
+					kind: "tool",
+					tool: {
+						agent,
+						phase: "end",
+						toolCallId: event.toolCallId,
+						toolName: event.toolName,
+						result: event.result,
+						isError: event.isError,
+					},
+				});
+			}
 			return;
 		}
 
@@ -747,23 +815,29 @@ export default function (pi: ExtensionAPI) {
 				});
 			},
 			onAgentTurnStart(agent: ThinktankRoomAgentInfo): void {
-				ctx.ui.setStatus("thinktank-active", `${agent.visibleName} has the floor`);
-				ctx.ui.setWorkingMessage(`${agent.visibleName} is thinking`);
+				const status = isLeaderLedRoom()
+					? (liveState.status || `${agent.visibleName} ${agent.role === "leader" ? "working" : "replying"}…`)
+					: `${agent.visibleName} has the floor`;
+				ctx.ui.setStatus("thinktank-active", status);
+				ctx.ui.setWorkingMessage(status);
 				ctx.ui.setWorkingVisible(true);
-				resetLiveTurn(agent, `${agent.visibleName} has the floor`);
+				resetLiveTurn(agent, status);
 			},
-			onAgentTurnEnd(agent: ThinktankRoomAgentInfo, text: string): void {
+			onAgentTurnEnd(agent: ThinktankRoomAgentInfo, text: string, presentation?: TurnPresentation): void {
 				updateLiveState({
 					visible: true,
 					status: `${agent.visibleName} finished this turn`,
 					agent,
+					text: "",
+					thinking: "",
 					toolCalls: [],
 				});
-				if (!text.trim()) {
+				if (!text.trim() || presentation === "collapsed") {
 					return;
 				}
 				send({
 					kind: "agent",
+					title: presentation === "final" ? `${agent.visibleName} final answer` : undefined,
 					agent,
 					text,
 					transcriptFile: room?.transcriptFile,
@@ -825,12 +899,16 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.setWorkingMessage();
 				ctx.ui.setWorkingVisible(false);
 				updateLiveState({ visible: false, status: "", agent: undefined, text: "", thinking: "", toolCalls: [] });
-				send({
-					kind: "status",
-					title: idle.title,
-					text: idle.text,
-					transcriptFile: room?.transcriptFile,
-				});
+				// In leader-led mode the leader's final answer should remain the last
+				// prominent output; the footer still reports that the room finished.
+				if (summary.reason !== "leader_final") {
+					send({
+						kind: "status",
+						title: idle.title,
+						text: idle.text,
+						transcriptFile: room?.transcriptFile,
+					});
+				}
 				if (pendingRosterApply) {
 					void applyRosterToRoom(ctx).catch((error: unknown) => {
 						ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -846,11 +924,14 @@ export default function (pi: ExtensionAPI) {
 			return room;
 		}
 
+		const settings = readThinktankSettings();
 		room = new ThinktankRoomRuntime({
 			services: await ensureServices(ctx),
 			deps: defaultRuntimeDeps,
 			cwd: ctx.cwd,
 			rosterSelections: currentRoster,
+			roomMode: resolveRoomMode(currentRoster),
+			leaderLedMaxTurns: typeof settings.leaderLedMaxTurns === "number" ? settings.leaderLedMaxTurns : undefined,
 			callbacks: createCallbacks(ctx),
 		});
 		await room.ready();
@@ -1014,7 +1095,7 @@ export default function (pi: ExtensionAPI) {
 	);
 
 	pi.registerCommand("thinktank", {
-		description: "Configure Thinktank: /thinktank [on|off|status|roster|sessions|reset-labs]",
+		description: "Configure Thinktank: /thinktank [on|off|status|roster|mode|sessions|reset-labs]",
 		handler: async (args, ctx) => {
 			const value = args.trim().toLowerCase();
 			if (!value || value === "status") {
@@ -1025,6 +1106,34 @@ export default function (pi: ExtensionAPI) {
 
 			if (value === "roster") {
 				await openRoster(ctx);
+				return;
+			}
+
+			if (value === "mode" || value.startsWith("mode ")) {
+				const requested = value.slice("mode".length).trim();
+				if (!requested) {
+					ctx.ui.notify(`Thinktank mode: ${resolveRoomMode(roster ?? resolveRoster(ctx))}`, "info");
+					return;
+				}
+				if (requested !== "leader-led" && requested !== "debate") {
+					ctx.ui.notify("Usage: /thinktank mode [leader-led|debate]", "error");
+					return;
+				}
+				const currentRoster = roster ?? resolveRoster(ctx);
+				if (requested === "leader-led" && !hasValidLeader(currentRoster)) {
+					ctx.ui.notify("Leader-led mode requires exactly one enabled leader. Choose one in /thinktank roster.", "error");
+					return;
+				}
+				persistRoomMode(requested);
+				if (room?.isRunning) {
+					pendingRosterApply = true;
+				} else if (room) {
+					// Recreate sessions so per-role tool policy changes with the mode.
+					room.dispose();
+					room = undefined;
+				}
+				updateRosterStatus(ctx);
+				ctx.ui.notify(`Thinktank mode set to ${requested}`, "info");
 				return;
 			}
 
@@ -1046,8 +1155,20 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (value !== "on" && value !== "off") {
-				ctx.ui.notify("Usage: /thinktank [on|off|status|roster|sessions|reset-labs]", "error");
+				ctx.ui.notify("Usage: /thinktank [on|off|status|roster|mode|sessions|reset-labs]", "error");
 				return;
+			}
+
+			if (value === "on") {
+				const currentRoster = roster ?? resolveRoster(ctx);
+				if (currentRoster.filter((entry) => !entry.disabled).length === 0) {
+					ctx.ui.notify("Add at least one enabled model in /thinktank roster before turning Thinktank on.", "error");
+					return;
+				}
+				if (resolveRoomMode(currentRoster) === "leader-led" && !hasValidLeader(currentRoster)) {
+					ctx.ui.notify("Choose exactly one enabled leader in /thinktank roster before turning Thinktank on.", "error");
+					return;
+				}
 			}
 
 			setThinktankEnabled(ctx, value === "on");
@@ -1123,6 +1244,16 @@ export default function (pi: ExtensionAPI) {
 			return { action: "continue" };
 		}
 
+		const resolvedRoster = resolveRoster(ctx);
+		const activeRoster = resolvedRoster.filter((entry) => !entry.disabled);
+		if (activeRoster.length === 0) {
+			return { action: "continue" };
+		}
+		if (resolveRoomMode(resolvedRoster) === "leader-led" && !hasValidLeader(resolvedRoster)) {
+			return { action: "continue" };
+		}
+
+		roster = resolvedRoster;
 		const prompt = text || "Discuss the attached image prompt.";
 		enqueueRoomPrompt(ctx, prompt, event.images ?? []);
 		return { action: "handled" };

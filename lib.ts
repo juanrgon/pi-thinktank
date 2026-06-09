@@ -11,6 +11,9 @@ export {
 	getThinktankRoomSessionDir,
 	getThinktankTranscriptPath,
 	isAssistantContinuationAfterCompactionError,
+	leaderControlInstructions,
+	parseLeaderControl,
+	pickNextLeaderSpeaker,
 	resetAgentFailurePolicyState,
 	shouldRetryPromptAfterCompactionFailure,
 	ThinktankRoomRuntime,
@@ -25,6 +28,11 @@ export {
 	type CompactionRetryState,
 	type ContextUsageSnapshot,
 	type InterruptionContext,
+	type LeaderControl,
+	type LeaderControlAction,
+	type LeaderSchedulerDecision,
+	type LeaderSchedulerInput,
+	type ParsedLeaderTurn,
 	type PrecompactionCooldown,
 	type PrecompactionDecision,
 	type PrecompactionDecisionReason,
@@ -35,6 +43,8 @@ export {
 	type ThinktankLabSessionInfo,
 	type ThinktankRoomAgentInfo,
 	type ThinktankRoomCallbacks,
+	type ThinktankRoomMode,
+	type TurnPresentation,
 } from "./room-runtime.ts";
 
 export { defaultRuntimeDeps } from "./runtime-default-deps.ts";
@@ -64,6 +74,7 @@ export {
 	type LabId,
 	type ThinktankAgentModelSelection,
 	type ThinktankAgentModelSelections,
+	type ThinktankAgentRole,
 	type ThinktankAgentRosterSelection,
 	type ThinktankAgentRosterSelections,
 	type ThinktankAvailableModel,

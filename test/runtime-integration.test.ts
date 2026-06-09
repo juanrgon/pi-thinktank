@@ -742,6 +742,97 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		room.dispose();
 	});
 
+	test("leader-led mode consults a read-only advisor, returns to leader, and exposes only leader final", async () => {
+		const leaderModel = createFakeModel({ provider: "github-copilot", id: "gpt-5.5", name: "Kepler" });
+		const advisorModel = createFakeModel({ provider: "anthropic", id: "claude-opus", name: "Claude Opus" });
+		const services = new FakeServices({ models: [leaderModel, advisorModel] });
+		const deps = new FakeRuntimeDeps();
+		const turns: Array<{ id: string; text: string; presentation?: string }> = [];
+		let idleReason: string | undefined;
+		const room = new ThinktankRoomRuntime({
+			services,
+			deps,
+			cwd: `/tmp/thinktank-leader-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			roomMode: "leader-led",
+			rosterSelections: [
+				{ id: "leader", role: "leader", model: leaderModel, thinkingLevel: "high" },
+				{ id: "advisor", role: "advisor", model: advisorModel, thinkingLevel: "high" },
+			],
+			callbacks: {
+				onAgentTurnEnd: (agent, text, presentation) => turns.push({ id: agent.id, text, presentation }),
+				onRoomIdle: (summary) => { idleReason = summary.reason; },
+			},
+		});
+		await room.ready();
+
+		const leaderIndex = deps.createLabSessionCalls.findIndex((call) => call.model.id === "gpt-5.5");
+		const advisorIndex = deps.createLabSessionCalls.findIndex((call) => call.model.id === "claude-opus");
+		const leaderSession = deps.createdSessions[leaderIndex];
+		const advisorSession = deps.createdSessions[advisorIndex];
+		assert.ok(leaderSession && advisorSession);
+		assert.equal(deps.createLabSessionCalls[leaderIndex]?.tools, undefined, "leader keeps configured room tools");
+		assert.deepEqual([...(deps.createLabSessionCalls[advisorIndex]?.tools ?? [])], ["read", "grep", "find", "ls"]);
+
+		leaderSession.queuePromptMessage('Check the parser edge cases.\nCONTROL: {"action":"consult","next":"advisor"}');
+		advisorSession.queuePromptMessage('The parser mishandles malformed JSON.\nCONTROL: {"action":"final"}');
+		leaderSession.queuePromptMessage('Implemented and verified the parser fix.\nCONTROL: {"action":"final"}');
+
+		await room.submitHumanPrompt("fix the parser");
+
+		assert.equal(leaderSession.promptCalls.length, 2);
+		assert.equal(advisorSession.promptCalls.length, 1);
+		assert.match(advisorSession.promptCalls[0]?.prompt ?? "", /Check the parser edge cases/);
+		assert.match(leaderSession.promptCalls[1]?.prompt ?? "", /parser mishandles malformed JSON/);
+		assert.deepEqual(turns.map((turn) => `${turn.id}:${turn.presentation}`), [
+			"leader:collapsed",
+			"advisor:collapsed",
+			"leader:final",
+		]);
+		assert.equal(idleReason, "leader_final");
+		room.dispose();
+	});
+
+	test("leader-led mode halts without a leader and enforces its hidden-turn budget", async () => {
+		const model = createFakeModel();
+		const noLeaderServices = new FakeServices({ models: [model] });
+		const noLeaderDeps = new FakeRuntimeDeps();
+		let noLeaderReason: string | undefined;
+		const noLeaderRoom = new ThinktankRoomRuntime({
+			services: noLeaderServices,
+			deps: noLeaderDeps,
+			cwd: `/tmp/thinktank-no-leader-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			roomMode: "leader-led",
+			rosterSelections: [{ id: "advisor", role: "advisor", model, thinkingLevel: "high" }],
+			callbacks: { onRoomIdle: (summary) => { noLeaderReason = summary.reason; } },
+		});
+		await noLeaderRoom.ready();
+		await noLeaderRoom.submitHumanPrompt("hello");
+		assert.equal(noLeaderReason, "leader_unavailable");
+		assert.equal(noLeaderDeps.createdSessions[0]?.promptCalls.length, 0);
+		noLeaderRoom.dispose();
+
+		const budgetServices = new FakeServices({ models: [model] });
+		const budgetDeps = new FakeRuntimeDeps();
+		let budgetReason: string | undefined;
+		const budgetRoom = new ThinktankRoomRuntime({
+			services: budgetServices,
+			deps: budgetDeps,
+			cwd: `/tmp/thinktank-budget-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			roomMode: "leader-led",
+			leaderLedMaxTurns: 2,
+			rosterSelections: [{ id: "leader", role: "leader", model, thinkingLevel: "high" }],
+			callbacks: { onRoomIdle: (summary) => { budgetReason = summary.reason; } },
+		});
+		await budgetRoom.ready();
+		const session = budgetDeps.createdSessions[0]!;
+		session.queuePromptMessage('still working\nCONTROL: {"action":"continue"}');
+		session.queuePromptMessage('still working again\nCONTROL: {"action":"continue"}');
+		await budgetRoom.submitHumanPrompt("work forever");
+		assert.equal(session.promptCalls.length, 2);
+		assert.equal(budgetReason, "turn_limit");
+		budgetRoom.dispose();
+	});
+
 	test("a handoff to a non-responding agent does not loop the room", async () => {
 		// Reproduces the manual-test loop: agent A nominates B via CONTROL next, but
 		// B produces no visible contribution. The room must not hand the floor to B

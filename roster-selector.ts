@@ -86,7 +86,7 @@ export class RosterSelectorComponent extends Container implements Focusable {
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(this.theme.fg("accent", this.theme.bold("Thinktank Roster")), 0, 0));
-		this.addChild(new Text(this.theme.fg("muted", "Add any Pi model any number of times. Changes apply immediately."), 0, 0));
+		this.addChild(new Text(this.theme.fg("muted", "Add models, then mark the one you trust as leader. Changes apply immediately."), 0, 0));
 		this.addChild(new Spacer(1));
 
 		this.slotContainer = new Container();
@@ -121,6 +121,7 @@ export class RosterSelectorComponent extends Container implements Focusable {
 				keyHint("tui.input.tab", "agent"),
 				rawKeyHint("+", "add"),
 				rawKeyHint("Ctrl+X", "remove"),
+				rawKeyHint("L", "make leader"),
 				rawKeyHint("Space", "enable/disable"),
 				keyHint("tui.select.confirm", this.activeEntry ? "set model" : "add"),
 				keyHint("tui.select.cancel", "close"),
@@ -169,9 +170,10 @@ export class RosterSelectorComponent extends Container implements Focusable {
 			const isActive = i === this.selectedAgentIndex;
 			const prefix = isActive ? this.theme.fg("accent", "→ ") : "  ";
 			const agentText = isActive ? this.theme.fg("accent", `Agent ${i + 1}`.padEnd(9)) : `Agent ${i + 1}`.padEnd(9);
+			const role = entry.role === "leader" ? this.theme.fg("success", "leader ") : "advisor ";
 			const modelText = entry.disabled
-				? this.theme.fg("muted", `disabled ${entry.model.provider}/${entry.model.id}:${entry.thinkingLevel}`)
-				: `${entry.model.provider}/${entry.model.id}:${entry.thinkingLevel}`;
+				? this.theme.fg("muted", `${role}disabled ${entry.model.provider}/${entry.model.id}:${entry.thinkingLevel}`)
+				: `${role}${entry.model.provider}/${entry.model.id}:${entry.thinkingLevel}`;
 			this.slotContainer.addChild(new Text(`${prefix}${agentText} ${modelText}`, 0, 0));
 		}
 		if (startIndex > 0 || endIndex < this.selections.length) {
@@ -233,6 +235,7 @@ export class RosterSelectorComponent extends Container implements Focusable {
 	private addCurrentModel(): void {
 		const item = this.filteredModels[this.selectedModelIndex];
 		if (!item) return;
+		const role = this.selections.length === 0 ? "leader" : "advisor";
 		this.selections = [
 			...this.selections,
 			{
@@ -240,6 +243,7 @@ export class RosterSelectorComponent extends Container implements Focusable {
 				model: item.model,
 				thinkingLevel: clampThinktankThinkingLevel(item.model, undefined),
 				disabled: false,
+				role,
 			},
 		];
 		this.selectedAgentIndex = this.selections.length - 1;
@@ -279,6 +283,15 @@ export class RosterSelectorComponent extends Container implements Focusable {
 		this.selections = this.selections.map((entry, index) =>
 			index === this.selectedAgentIndex ? { ...entry, disabled: !entry.disabled } : entry,
 		);
+		this.emitChange();
+	}
+
+	private makeActiveAgentLeader(): void {
+		if (!this.activeEntry) return;
+		this.selections = this.selections.map((entry, index) => ({
+			...entry,
+			role: index === this.selectedAgentIndex ? "leader" : "advisor",
+		}));
 		this.emitChange();
 	}
 
@@ -324,6 +337,10 @@ export class RosterSelectorComponent extends Container implements Focusable {
 		}
 		if (matchesKey(data, Key.ctrl("x"))) {
 			this.removeActiveAgent();
+			return;
+		}
+		if (this.searchInput.getValue() === "" && data.toLowerCase() === "l") {
+			this.makeActiveAgentLeader();
 			return;
 		}
 		if (this.searchInput.getValue() === "" && matchesKey(data, Key.space)) {

@@ -12,7 +12,23 @@ The private per-agent context owned by a Lab Agent for a working directory. Lab 
 
 ## Thinktank room
 
-A shared multi-agent conversation hosted inside a Pi session. The room lets the human participant and enabled Lab Agents coordinate through a public transcript.
+A shared multi-agent conversation hosted inside a Pi session. The room lets the human participant and enabled Lab Agents coordinate through an auditable transcript.
+
+## Leader-led room
+
+The default room shape after the human explicitly selects one trusted Lab Agent as leader. The leader works on the request, consults advisors through hub-and-spoke exchanges, and owns the final user-facing answer. Intermediate work is collapsed in the normal UI but remains auditable.
+
+## Leader
+
+The human-selected Lab Agent trusted to supervise a leader-led room and produce its final answer. Leader authority controls routing and presentation; it never bypasses configured tool or mutation policy.
+
+## Advisor
+
+A Lab Agent consulted by the leader for focused evidence, critique, or research. Advisors are read-only by default, always return the floor to the leader, and cannot finalize or redirect a leader-led room.
+
+## Debate room
+
+The opt-in freeform room shape in which Lab Agents route the floor through standing CONTROL trailers without a designated leader.
 
 ## Internal alpha
 

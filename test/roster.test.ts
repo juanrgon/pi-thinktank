@@ -70,8 +70,8 @@ describe("dynamic thinktank roster", () => {
 		const roster = selectThinktankRoster(
 			available,
 			[
-				{ id: "b", provider: "custom", model: "b", thinkingLevel: "xhigh", disabled: true },
-				{ id: "a", provider: "custom", model: "a", thinkingLevel: "low" },
+				{ id: "b", provider: "custom", model: "b", thinkingLevel: "xhigh", disabled: true, role: "advisor" },
+				{ id: "a", provider: "custom", model: "a", thinkingLevel: "low", role: "leader" },
 			],
 			(_model, level) => (level === "xhigh" ? "high" : (level ?? "off")),
 		);
@@ -79,6 +79,8 @@ describe("dynamic thinktank roster", () => {
 		assert.equal(roster[0]?.thinkingLevel, "high");
 		assert.equal(roster[0]?.disabled, true);
 		assert.equal(roster[1]?.thinkingLevel, "low");
+		assert.equal(roster[0]?.role, "advisor");
+		assert.equal(roster[1]?.role, "leader");
 	});
 
 	test("getThinktankAvailableModels returns every model", () => {

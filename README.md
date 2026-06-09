@@ -18,13 +18,13 @@ After installation, reload Pi:
 /reload
 ```
 
-A new installation starts with an empty roster. Use the Thinktank roster to add any models currently available in Pi:
+A new installation starts **off** with an empty roster. Use the Thinktank roster to add any models currently available in Pi and mark the model you trust as the leader:
 
 ```text
 /thinktank roster
 ```
 
-The roster can contain any number of agents, including multiple agents using the exact same provider/model. If it shows no available models, run `/login` first to configure your provider credentials.
+The roster can contain any number of agents, including multiple agents using the exact same provider/model. The first added model becomes leader; press `L` in the roster to choose a different leader. If the roster shows no available models, run `/login` first to configure your provider credentials.
 
 Turn on the Thinktank:
 
@@ -32,11 +32,13 @@ Turn on the Thinktank:
 /thinktank on
 ```
 
-Type a prompt. The models will take turns discussing the prompt, with tool use visible in the shared transcript.
+Type a prompt. In the default **leader-led** mode, the leader works on the request, consults read-only advisors when useful, and produces the final answer. Intermediate conversation is collapsed into compact activity such as `Leader consulting Advisor…`; the complete audit trail remains in `transcript.jsonl`.
+
+Use `/thinktank mode debate` for the original freeform shared-room discussion, or `/thinktank mode leader-led` to switch back. Existing rosters without a selected leader remain in debate mode until you choose one.
 
 ## Lab agent tools
 
-By default each lab agent gets the built-in coding tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) **plus** every installed extension/MCP tool (for example web/code search and page fetch), so agents can research and use the same capabilities you have.
+In leader-led mode, the leader gets the normal Thinktank tool policy while advisors are read-only by default (`read`, `grep`, `find`, `ls`). In debate mode, each lab agent gets the built-in coding tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) **plus** every installed extension/MCP tool (for example web/code search and page fetch), so agents can research and use the same capabilities you have.
 
 The one exception is the **interactive desktop-control tools** (`screen_capture`, mouse/keyboard, `type_text`, `press_keys`, etc.). These drive your physical machine and are excluded by default so autonomous in-room agents can't take over your desktop.
 

@@ -26,6 +26,7 @@ import {
 	getThinktankVisibleName,
 	selectThinktankRoster,
 	type ThinktankRosterModels,
+	type ThinktankAgentRole,
 } from "./roster.ts";
 import type {
 	ThinktankAgentMessageLike,
@@ -48,6 +49,12 @@ import {
 	type SpeakerTrailer,
 } from "./control-trailer.ts";
 import { pickNextSpeaker } from "./scheduler.ts";
+import {
+	leaderControlInstructions,
+	parseLeaderControl,
+	type LeaderControl,
+} from "./leader-control.ts";
+import { pickNextLeaderSpeaker } from "./leader-scheduler.ts";
 
 export { classifyAgentError, type AgentErrorCategory, type ClassifiedAgentError } from "./agent-error.ts";
 export {
@@ -93,6 +100,22 @@ export {
 	type SchedulerInput,
 	type SchedulerStopReason,
 } from "./scheduler.ts";
+export {
+	ABSENT_LEADER_CONTROL,
+	leaderControlInstructions,
+	parseLeaderControl,
+	type LeaderControl,
+	type LeaderControlAction,
+	type ParsedLeaderTurn,
+} from "./leader-control.ts";
+export {
+	pickNextLeaderSpeaker,
+	type LeaderSchedulerDecision,
+	type LeaderSchedulerInput,
+} from "./leader-scheduler.ts";
+
+export type ThinktankRoomMode = "leader-led" | "debate";
+export type TurnPresentation = "foreground" | "collapsed" | "final";
 
 export interface ThinktankRoomAgentInfo {
 	id: AgentId;
@@ -101,6 +124,7 @@ export interface ThinktankRoomAgentInfo {
 	provider: string;
 	model: string;
 	thinkingLevel: ThinkingLevel;
+	role: ThinktankAgentRole;
 }
 
 export type AgentTurnPhase = "opening" | "discussion" | "closing" | "response";
@@ -113,6 +137,8 @@ export type RoomIdleReason =
 	| "halted"
 	| "all_suppressed"
 	| "no_active_agents"
+	| "leader_final"
+	| "leader_unavailable"
 	| "internal";
 
 export interface RoomIdleSummary {
@@ -128,7 +154,7 @@ export interface ThinktankAgentTurnError extends ClassifiedAgentError {
 export interface ThinktankRoomCallbacks {
 	onStatus?(message: string): void;
 	onAgentTurnStart?(agent: ThinktankRoomAgentInfo): void;
-	onAgentTurnEnd?(agent: ThinktankRoomAgentInfo, text: string): void;
+	onAgentTurnEnd?(agent: ThinktankRoomAgentInfo, text: string, presentation?: TurnPresentation): void;
 	onAgentTurnError?(agent: ThinktankRoomAgentInfo, phase: AgentTurnPhase, error: ThinktankAgentTurnError): void;
 	onAgentEvent?(
 		agent: ThinktankRoomAgentInfo,
@@ -178,6 +204,7 @@ interface PublicActionSummary {
 
 interface LabAgentRuntime {
 	id: AgentId;
+	role: ThinktankAgentRole;
 	model: ThinktankModelLike;
 	thinkingLevel: ThinkingLevel;
 	visibleName: string;
@@ -197,12 +224,15 @@ export interface ThinktankLabSessionInfo {
 	provider?: string;
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
+	role?: ThinktankAgentRole;
 	sessionDir: string;
 	sessionFile?: string;
 }
 
 const MAX_ROOM_TURNS = 1000;
 const DEFAULT_MAX_ROUNDS = 8;
+const DEFAULT_LEADER_LED_MAX_TURNS = 12;
+const THINKTANK_ADVISOR_TOOLS = ["read", "grep", "find", "ls"] as const;
 const MAX_POST_COMPACTION_PROMPT_RETRIES = 1;
 // Interactive desktop-control tools excluded from lab agents by default: they
 // drive the human participant's physical machine (mouse, keyboard, screen) and
@@ -224,6 +254,7 @@ const THINKTANK_PRECOMPACTION_THRESHOLD_RATIO = DEFAULT_PRECOMPACTION_THRESHOLD_
 const THINKTANK_PRECOMPACTION_COOLDOWN_MS = 10 * 60 * 1000;
 const READ_WRITE_TOOL_WARNING = `Tool use is public in this room. Reads, searches, and bash exploration may proceed.
 Before edits, writes, or destructive shell commands, state the intended change in the public conversation and wait for the room to converge.`;
+const LEADER_TOOL_WARNING = `Your tool use is audited and important actions are shown to the human. You are the trusted leader, but that role never bypasses configured tool restrictions. Make only changes needed for the human's request, avoid destructive actions, and validate your work.`;
 
 const THINKTANK_PRECOMPACTION_INSTRUCTIONS =
 	"Summarize this Lab Agent's private Thinktank room-session context before it takes another turn. Preserve the human's goals, the room's current task, prior Lab Agent conclusions, public tool actions, important files or commands, and unresolved decisions. Keep the summary compact enough for several more Thinktank turns.";
@@ -274,6 +305,7 @@ function getAgentInfo(agent: LabAgentRuntime): ThinktankRoomAgentInfo {
 		provider: agent.model.provider,
 		model: agent.model.id,
 		thinkingLevel: agent.thinkingLevel,
+		role: agent.role,
 	};
 }
 
@@ -361,8 +393,12 @@ export class ThinktankRoomRuntime {
 	private failurePolicyStates = new Map<string, AgentFailurePolicyState>();
 	private standingTrailers = new Map<AgentId, SpeakerTrailer>();
 	private maxRounds: number;
+	private leaderLedMaxTurns: number;
+	private roomMode: ThinktankRoomMode;
 	private labTools?: readonly string[] | "all";
+	private advisorTools: readonly string[];
 	private labMemory: "ephemeral" | "persistent";
+	private currentLeaderConsultRequest = "";
 	private roomHalted = false;
 	private currentHumanPrompt = "";
 	private currentHumanImages: ImageContent[] = [];
@@ -382,6 +418,9 @@ export class ThinktankRoomRuntime {
 		rosterSelections: ThinktankRosterModels;
 		callbacks: ThinktankRoomCallbacks;
 		maxRounds?: number;
+		roomMode?: ThinktankRoomMode;
+		leaderLedMaxTurns?: number;
+		advisorTools?: readonly string[];
 		/**
 		 * Tool access for lab agents:
 		 *  - undefined (default): the built-in coding tools plus all extension/MCP
@@ -404,7 +443,10 @@ export class ThinktankRoomRuntime {
 		this.cwd = options.cwd;
 		this.callbacks = options.callbacks;
 		this.maxRounds = Math.max(1, options.maxRounds ?? DEFAULT_MAX_ROUNDS);
+		this.leaderLedMaxTurns = Math.max(1, options.leaderLedMaxTurns ?? DEFAULT_LEADER_LED_MAX_TURNS);
+		this.roomMode = options.roomMode ?? "debate";
 		this.labTools = options.labTools;
+		this.advisorTools = options.advisorTools ?? THINKTANK_ADVISOR_TOOLS;
 		this.labMemory = options.labMemory ?? "ephemeral";
 		this.roomSessionDir = createRoomSessionDir(options.cwd);
 		this.transcriptPath = join(this.roomSessionDir, "transcript.jsonl");
@@ -413,6 +455,10 @@ export class ThinktankRoomRuntime {
 
 	get isRunning(): boolean {
 		return this.running;
+	}
+
+	get mode(): ThinktankRoomMode {
+		return this.roomMode;
 	}
 
 	get agentInfos(): ThinktankRoomAgentInfo[] {
@@ -440,6 +486,7 @@ export class ThinktankRoomRuntime {
 			provider: agent.model.provider,
 			model: agent.model.id,
 			thinkingLevel: agent.thinkingLevel,
+			role: agent.role,
 			sessionDir: getAgentSessionDir(this.roomSessionDir, agent.id),
 			sessionFile: agent.session.sessionFile,
 		}));
@@ -455,6 +502,13 @@ export class ThinktankRoomRuntime {
 		}
 		this.readyPromise = this.rebuildAgents(rosterSelections);
 		await this.readyPromise;
+	}
+
+	setMode(mode: ThinktankRoomMode): void {
+		if (this.running) {
+			throw new Error("Room mode can be changed once the room is idle.");
+		}
+		this.roomMode = mode;
 	}
 
 	dispose(): void {
@@ -483,6 +537,7 @@ export class ThinktankRoomRuntime {
 				model: entry.model.id,
 				thinkingLevel: entry.thinkingLevel,
 				disabled: entry.disabled,
+				role: entry.role,
 			})),
 			// Inject the deps clamp so roster.ts doesn't import pi-ai value imports.
 			(model, level) => this.deps.clampThinkingLevel(model, level ?? "high") as ThinkingLevel,
@@ -513,11 +568,12 @@ export class ThinktankRoomRuntime {
 				model,
 				thinkingLevel,
 				resumeRecentSession: this.labMemory === "persistent",
-				...this.resolveLabToolOptions(),
+				...this.resolveLabToolOptions(rosterEntry.role ?? "advisor"),
 			});
 
 			const labAgent: LabAgentRuntime = {
 				id,
+				role: rosterEntry.role ?? "advisor",
 				model,
 				thinkingLevel,
 				visibleName: getThinktankVisibleName(model, duplicateNumber),
@@ -540,7 +596,10 @@ export class ThinktankRoomRuntime {
 	// An explicit allowlist is passed through as `tools`; otherwise the session is
 	// created with no allowlist (all tools available) and the adapter activates
 	// the full set minus `excludeTools`.
-	private resolveLabToolOptions(): { tools?: readonly string[]; excludeTools?: readonly string[] } {
+	private resolveLabToolOptions(role: ThinktankAgentRole): { tools?: readonly string[]; excludeTools?: readonly string[] } {
+		if (this.roomMode === "leader-led" && role === "advisor") {
+			return { tools: this.advisorTools };
+		}
 		if (Array.isArray(this.labTools)) {
 			return { tools: this.labTools };
 		}
@@ -873,10 +932,51 @@ export class ThinktankRoomRuntime {
 		return snapshot;
 	}
 
+	private buildLeaderLedPrompt(agent: LabAgentRuntime): string {
+		const advisors = this.activeAgents().filter((candidate) => candidate.role === "advisor");
+		const advisorIds = advisors.map((candidate) => candidate.id);
+		const roster = this.agents
+			.map((candidate) => `${candidate.id}: ${candidate.visibleName} [${candidate.role}]`)
+			.join("\n");
+		const shared = `Human participant prompt:\n\n${this.currentHumanPrompt}\n\nRoster:\n${roster}\n\nPublic action summaries:\n${actionSummaryText(this.publicActions)}\n\nTranscript JSONL: ${this.transcriptPath}`;
+		if (agent.role === "advisor") {
+			return `You are advisor ${agent.id} (${agent.visibleName}) in a leader-led Thinktank room.
+The trusted leader asked you a focused question. You are read-only by default. Give the leader useful evidence, corrections, or risks, then return the floor. Your reply is collapsed in the normal UI but recorded for audit.
+
+${shared}
+
+Leader's focused request:
+
+${this.currentLeaderConsultRequest || "Review the human request and give the leader your most useful advice."}
+
+${leaderControlInstructions(advisorIds, false)}
+
+Write only your reply to the leader, then the CONTROL line.`;
+		}
+
+		return `You are the trusted leader ${agent.id} (${agent.visibleName}) in a leader-led Thinktank room.
+You own the final response to the human. Work directly, use tools when useful, and consult advisors only when their perspective would improve the result. Advisor replies and your intermediate turns are collapsed in the normal UI but recorded for audit. Keep the final answer succinct and directly useful.
+
+${shared}
+
+Hidden work transcript so far:
+
+${transcriptText(this.transcript)}
+
+${LEADER_TOOL_WARNING}
+
+${leaderControlInstructions(advisorIds, true)}
+
+Write only the current request, intermediate note, or final answer, then the CONTROL line.`;
+	}
+
 	private buildPromptForAgent(
 		agent: LabAgentRuntime,
 		phase: AgentTurnPhase = "discussion",
 	): string {
+		if (this.roomMode === "leader-led") {
+			return this.buildLeaderLedPrompt(agent);
+		}
 		const roster = this.agents
 			.map(
 				(candidate) =>
@@ -1045,7 +1145,13 @@ Write only your visible contribution to the room, then the single CONTROL line. 
 		const lastPolls = new Map<AgentId, number>();
 
 		while (!signal.aborted) {
-			await new Promise((resolve) => setTimeout(resolve, 2000));
+			await new Promise<void>((resolve) => {
+				const timer = setTimeout(resolve, 2000);
+				signal.addEventListener("abort", () => {
+					clearTimeout(timer);
+					resolve();
+				}, { once: true });
+			});
 			if (signal.aborted || !this.activeTurn || this.interruptionLock) {
 				break;
 			}
@@ -1062,9 +1168,15 @@ Write only your visible contribution to the room, then the single CONTROL line. 
 			}
 
 			const activeAgentId = this.activeTurn.agent.id;
-			const eligibleAgents = this.activeAgents().filter(
-				(a) => a.id !== activeAgentId && now - (lastPolls.get(a.id) ?? 0) >= POLL_INTERVAL_MS,
-			);
+			const eligibleAgents = this.activeAgents().filter((candidate) => {
+				if (candidate.id === activeAgentId || now - (lastPolls.get(candidate.id) ?? 0) < POLL_INTERVAL_MS) {
+					return false;
+				}
+				if (this.roomMode !== "leader-led") return true;
+				// Advisors never redirect the trusted leader. The leader may still
+				// interrupt an advisor, while user/runtime interruption always works.
+				return this.activeTurn?.agent.role === "advisor" && candidate.role === "leader";
+			});
 
 			if (eligibleAgents.length === 0) {
 				continue;
@@ -1211,6 +1323,105 @@ Decide if you need to interrupt them immediately.`;
 		}
 	}
 
+	private async runLeaderLedRoom(): Promise<{ reason: RoomIdleReason; turns: number }> {
+		const leaders = this.activeAgents().filter((agent) => agent.role === "leader");
+		if (leaders.length !== 1) {
+			return { reason: "leader_unavailable", turns: 0 };
+		}
+		const leader = leaders[0]!;
+		let turns = 0;
+		let lastSpeakerId: AgentId | undefined;
+		let lastLeaderControl: LeaderControl | undefined;
+
+		while (true) {
+			const decision = pickNextLeaderSpeaker({
+				leaderId: leader.id,
+				activeAgentIds: this.activeAgents().map((agent) => agent.id),
+				lastSpeakerId,
+				lastLeaderControl,
+				turnsUsed: turns,
+				maxTurns: this.leaderLedMaxTurns,
+			});
+			this.appendRoomEvent({ type: "leader_turn_selection", turnIndex: turns, decision });
+			if (decision.action === "stop") {
+				return {
+					reason: decision.reason === "final" ? "leader_final" : decision.reason === "leader_unavailable" ? "leader_unavailable" : "turn_limit",
+					turns,
+				};
+			}
+
+			const agent = this.activeAgents().find((candidate) => candidate.id === decision.agentId);
+			if (!agent) return { reason: "internal", turns };
+			const isLeader = agent.id === leader.id;
+			const phase: AgentTurnPhase = turns === 0 ? "opening" : isLeader ? "discussion" : "response";
+			this.callbacks.onStatus?.(`${agent.visibleName} ${isLeader ? "is working" : "is replying"} · ${turns + 1}/${this.leaderLedMaxTurns}`);
+			this.callbacks.onAgentTurnStart?.(getAgentInfo(agent));
+
+			let finalText = "";
+			let control: LeaderControl = { present: false, action: "continue", next: null };
+			let turnErrored = false;
+			let turnInterrupted = false;
+			try {
+				const result = await this.promptAgentWithInterrupts(
+					agent,
+					this.buildPromptForAgent(agent, phase),
+					this.getImagesForAgentPrompt(agent),
+				);
+				if (result.status === "interrupted") {
+					turnInterrupted = true;
+					finalText = this.recordInterruptedTurn(agent, phase, result);
+				} else {
+					const lastMessage = getLastAssistantMessage(agent.session);
+					const stop = lastMessage?.stopReason;
+					if (stop === "error" || stop === "aborted") {
+						turnErrored = true;
+						this.recordAgentTurnError(agent, phase, new Error(lastMessage?.errorMessage || `${agent.visibleName} turn reported stopReason "${stop}"`));
+					} else {
+						const parsed = parseLeaderControl(result.text, this.activeAgents().filter((candidate) => candidate.role === "advisor").map((candidate) => candidate.id));
+						finalText = parsed.visibleText;
+						control = isLeader ? parsed.control : { present: parsed.control.present, action: "return", next: null, raw: parsed.control.raw };
+						if (isLeader && control.action === "final" && !finalText) {
+							control = { ...control, action: "continue" };
+						}
+					}
+				}
+			} catch (error) {
+				turnErrored = true;
+				const parsed = parseLeaderControl(getLastAssistantText(agent.session));
+				finalText = parsed.visibleText;
+				this.recordAgentTurnError(agent, phase, error, finalText);
+			}
+
+			turns++;
+			lastSpeakerId = agent.id;
+			if (isLeader) {
+				lastLeaderControl = turnErrored || turnInterrupted ? { present: false, action: "continue", next: null } : control;
+				if (control.action === "consult") this.currentLeaderConsultRequest = finalText;
+			}
+
+			if (!turnErrored && !turnInterrupted && finalText) {
+				const presentation: TurnPresentation = isLeader && control.action === "final" ? "final" : "collapsed";
+				this.transcript.push({ speaker: agent.visibleName, text: finalText });
+				this.appendRoomEvent({
+					type: "agent_turn",
+					phase,
+					agent: agent.visibleName,
+					provider: agent.model.provider,
+					model: agent.model.id,
+					role: agent.role,
+					presentation,
+					text: finalText,
+					control,
+				});
+				this.callbacks.onAgentTurnEnd?.(getAgentInfo(agent), finalText, presentation);
+			}
+			if (!turnErrored) this.recordAgentTurnSuccess(agent);
+			if (isLeader && (turnErrored || turnInterrupted || leader.suppressedForCurrentRoom)) {
+				return { reason: "leader_unavailable", turns };
+			}
+		}
+	}
+
 	async submitHumanPrompt(prompt: string, images: ImageContent[] = []): Promise<void> {
 		await this.ready();
 		if (this.disposed) {
@@ -1234,6 +1445,7 @@ Decide if you need to interrupt them immediately.`;
 		this.pendingPublicActions = new Map();
 		this.failurePolicyStates = new Map();
 		this.standingTrailers = new Map();
+		this.currentLeaderConsultRequest = "";
 		this.roomHalted = false;
 		for (const agent of this.agents) {
 			agent.suppressedForCurrentRoom = false;
@@ -1246,7 +1458,14 @@ Decide if you need to interrupt them immediately.`;
 			roster: this.agents.map((agent) => getAgentInfo(agent)),
 		});
 		let endReason: RoomIdleReason = "turn_limit";
+		let completedTurns: number | undefined;
 		try {
+			if (this.roomMode === "leader-led") {
+				const result = await this.runLeaderLedRoom();
+				endReason = result.reason;
+				completedTurns = result.turns;
+				return;
+			}
 			const initialActiveCount = Math.max(1, this.getUnsuppressedAgentCount());
 			const maxTurns = Math.min(MAX_ROOM_TURNS, this.maxRounds * initialActiveCount);
 			const mentionedAgentIds = this.getMentionedAgentIds();
@@ -1368,7 +1587,7 @@ Decide if you need to interrupt them immediately.`;
 			this.running = false;
 			const idleSummary: RoomIdleSummary = {
 				reason: endReason,
-				turns: this.transcript.length,
+				turns: completedTurns ?? this.transcript.length,
 				lastSpeaker: this.transcript[this.transcript.length - 1]?.speaker,
 			};
 			this.appendRoomEvent({ type: "room_idle", ...idleSummary });
