@@ -243,9 +243,22 @@ function tailText(text: string, maxLength: number): string {
 	return `...${trimmed.slice(-maxLength)}`;
 }
 
+function codeBlock(language: string, content: string): string {
+	const longestBacktickRun = Math.max(0, ...(content.match(/`+/g) ?? []).map((run) => run.length));
+	const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+	return `${fence}${language}\n${content}\n${fence}`;
+}
+
+function formatToolArgsMarkdown(toolName: string, args: unknown, maxLength: number): string {
+	if (toolName === "execute_typescript" && isObject(args) && typeof args.code === "string") {
+		return codeBlock("typescript", preview(args.code, maxLength));
+	}
+	return codeBlock("json", preview(args, maxLength));
+}
+
 function formatToolText(tool: ThinktankToolMessage): string {
 	if (tool.phase === "start") {
-		return `Calling \`${tool.toolName}\`\n\n\`\`\`json\n${preview(tool.args, 700)}\n\`\`\``;
+		return `Calling \`${tool.toolName}\`\n\n${formatToolArgsMarkdown(tool.toolName, tool.args, 700)}`;
 	}
 
 	const status = tool.isError ? "finished with an error" : "finished";
@@ -401,7 +414,7 @@ class LiveRoomWidget implements Component {
 		for (const toolCall of state.toolCalls) {
 			box.addChild(new Spacer(1));
 			box.addChild(new Text(this.theme.fg("warning", `Preparing tool: ${toolCall.name}`), 0, 0));
-			addMarkdown(box, `\`\`\`json\n${preview(toolCall.args, LIVE_TOOL_ARGS_LIMIT)}\n\`\`\``, (content) =>
+			addMarkdown(box, formatToolArgsMarkdown(toolCall.name, toolCall.args, LIVE_TOOL_ARGS_LIMIT), (content) =>
 				this.theme.fg("toolOutput", content),
 			);
 		}
