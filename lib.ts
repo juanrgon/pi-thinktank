@@ -37,6 +37,13 @@ export {
 	type ThinktankRoomCallbacks,
 } from "./room-runtime.ts";
 
+export { defaultRuntimeDeps } from "./runtime-default-deps.ts";
+export type {
+	ThinktankModelLike,
+	ThinktankRuntimeDeps,
+	ThinktankServicesLike,
+} from "./runtime-deps.ts";
+
 export {
 	clampThinktankThinkingLevel,
 	getThinktankSupportedThinkingLevels,

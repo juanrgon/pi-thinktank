@@ -107,24 +107,13 @@ export interface ThinktankCompactionEndEvent {
 	};
 }
 
-/**
- * Catch-all for event variants the runtime receives via subscribe() but
- * does not currently inspect. Listed last so the discriminated union still
- * narrows for the typed variants above.
- */
-export interface ThinktankUnhandledSessionEvent {
-	readonly type: string;
-	readonly [key: string]: unknown;
-}
-
 export type ThinktankSessionEventLike =
 	| ThinktankMessageUpdateEvent
 	| ThinktankMessageEndEvent
 	| ThinktankToolStartEvent
 	| ThinktankToolEndEvent
 	| ThinktankCompactionStartEvent
-	| ThinktankCompactionEndEvent
-	| ThinktankUnhandledSessionEvent;
+	| ThinktankCompactionEndEvent;
 
 export type ThinktankSessionEventListener = (event: ThinktankSessionEventLike) => void;
 
@@ -157,7 +146,7 @@ export interface ThinktankSessionLike {
 	subscribe(listener: ThinktankSessionEventListener): () => void;
 	getContextUsage(): ContextUsageSnapshot | undefined;
 	abort(): Promise<void>;
-	abortCompaction(): Promise<void>;
+	abortCompaction(): void | Promise<void>;
 	dispose(): void;
 }
 

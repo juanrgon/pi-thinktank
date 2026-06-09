@@ -43,19 +43,21 @@ export function evaluateAgentFailure(input: EvaluateAgentFailureInput): AgentFai
 		input.previous.category === input.category &&
 		input.nowMs - input.previous.lastFailureAtMs <= input.options.failureWindowMs;
 
-	const state: AgentFailurePolicyState = withinWindow
-		? {
-				...input.previous,
-				count: input.previous.count + 1,
-				lastFailureAtMs: input.nowMs,
-			}
-		: {
-				agentId: input.agentId,
-				category: input.category,
-				count: 1,
-				firstFailureAtMs: input.nowMs,
-				lastFailureAtMs: input.nowMs,
-			};
+	const previous = input.previous;
+	const state: AgentFailurePolicyState =
+		withinWindow && previous !== undefined
+			? {
+					...previous,
+					count: previous.count + 1,
+					lastFailureAtMs: input.nowMs,
+				}
+			: {
+					agentId: input.agentId,
+					category: input.category,
+					count: 1,
+					firstFailureAtMs: input.nowMs,
+					lastFailureAtMs: input.nowMs,
+				};
 
 	if (state.count < threshold) {
 		return {

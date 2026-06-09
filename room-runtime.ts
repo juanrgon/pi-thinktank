@@ -355,7 +355,7 @@ export class ThinktankRoomRuntime {
 	private transcript: TranscriptTurn[] = [];
 	private publicActions: PublicActionSummary[] = [];
 	private pendingPublicActions = new Map<string, PublicActionSummary>();
-	private failurePolicyStates = new Map<LabId, AgentFailurePolicyState>();
+	private failurePolicyStates = new Map<string, AgentFailurePolicyState>();
 	private standingTrailers = new Map<LabId, SpeakerTrailer>();
 	private maxRounds: number;
 	private labTools?: readonly string[] | "all";
