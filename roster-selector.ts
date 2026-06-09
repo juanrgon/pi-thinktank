@@ -17,11 +17,8 @@ import {
 	getThinktankSupportedThinkingLevels,
 } from "./roster-thinking.ts";
 import {
+	createThinktankAgentId,
 	getThinktankModelReference,
-	getThinktankModelsForLab,
-	type LabId,
-	THINKTANK_LAB_DEFINITIONS,
-	type ThinktankLabDefinition,
 	type ThinktankRoster,
 	type ThinktankRosterEntry,
 } from "./roster.ts";
@@ -43,31 +40,16 @@ export interface RosterSelectorCallbacks {
 }
 
 function cloneSelections(selections: ThinktankRoster): ThinktankRoster {
-	return Object.fromEntries(
-		Object.entries(selections).map(([labId, entry]) => [labId, entry ? { ...entry } : undefined]),
-	) as ThinktankRoster;
+	return selections.map((entry) => ({ ...entry }));
 }
 
-function compareModelsForLab(definition: ThinktankLabDefinition, selectedEntry: ThinktankRosterEntry | undefined) {
+function compareModels(selectedEntry: ThinktankRosterEntry | undefined) {
 	return (a: RosterModelItem, b: RosterModelItem): number => {
 		const aSelected = modelsAreEqual(a.model, selectedEntry?.model);
 		const bSelected = modelsAreEqual(b.model, selectedEntry?.model);
 		if (aSelected && !bSelected) return -1;
 		if (!aSelected && bSelected) return 1;
-
-		const aPreferred = definition.preferredModelIds.indexOf(a.model.id);
-		const bPreferred = definition.preferredModelIds.indexOf(b.model.id);
-		if (aPreferred >= 0 || bPreferred >= 0) {
-			if (aPreferred < 0) return 1;
-			if (bPreferred < 0) return -1;
-			if (aPreferred !== bPreferred) return aPreferred - bPreferred;
-		}
-
-		const aProvider = definition.providerCandidates.indexOf(a.model.provider);
-		const bProvider = definition.providerCandidates.indexOf(b.model.provider);
-		if (aProvider !== bProvider) return aProvider - bProvider;
-
-		return a.model.id.localeCompare(b.model.id);
+		return a.fullId.localeCompare(b.fullId);
 	};
 }
 
@@ -75,7 +57,7 @@ export class RosterSelectorComponent extends Container implements Focusable {
 	private allModels: Model<Api>[];
 	private selections: ThinktankRoster;
 	private callbacks: RosterSelectorCallbacks;
-	private selectedLabIndex = 0;
+	private selectedAgentIndex = 0;
 	private selectedModelIndex = 0;
 	private searchInput: Input;
 	private slotContainer: Container;
@@ -104,7 +86,7 @@ export class RosterSelectorComponent extends Container implements Focusable {
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(this.theme.fg("accent", this.theme.bold("Thinktank Roster")), 0, 0));
-		this.addChild(new Text(this.theme.fg("muted", "Saved roster. Changes apply immediately when you select."), 0, 0));
+		this.addChild(new Text(this.theme.fg("muted", "Add any Pi model any number of times. Changes apply immediately."), 0, 0));
 		this.addChild(new Spacer(1));
 
 		this.slotContainer = new Container();
@@ -126,8 +108,8 @@ export class RosterSelectorComponent extends Container implements Focusable {
 		this.refresh();
 	}
 
-	private get activeLab(): ThinktankLabDefinition {
-		return THINKTANK_LAB_DEFINITIONS[this.selectedLabIndex] ?? THINKTANK_LAB_DEFINITIONS[0]!;
+	private get activeEntry(): ThinktankRosterEntry | undefined {
+		return this.selections[this.selectedAgentIndex];
 	}
 
 	private getFooterText(): string {
@@ -136,23 +118,20 @@ export class RosterSelectorComponent extends Container implements Focusable {
 			[
 				rawKeyHint("↑↓", "model"),
 				rawKeyHint("←→", "effort"),
-				keyHint("tui.input.tab", "slot"),
+				keyHint("tui.input.tab", "agent"),
+				rawKeyHint("+", "add"),
+				rawKeyHint("Delete", "remove"),
 				rawKeyHint("Space", "enable/disable"),
-				keyHint("tui.select.confirm", "select"),
+				keyHint("tui.select.confirm", this.activeEntry ? "set model" : "add"),
 				keyHint("tui.select.cancel", "close"),
 			].join("  "),
 		);
 	}
 
 	private buildActiveModelItems(): RosterModelItem[] {
-		const lab = this.activeLab;
-		const selectedEntry = this.selections[lab.id];
-		return getThinktankModelsForLab(this.allModels, lab)
-			.map((model) => ({
-				fullId: getThinktankModelReference(model),
-				model,
-			}))
-			.sort(compareModelsForLab(lab, selectedEntry));
+		return this.allModels
+			.map((model) => ({ fullId: getThinktankModelReference(model), model }))
+			.sort(compareModels(this.activeEntry));
 	}
 
 	private refresh(): void {
@@ -162,8 +141,7 @@ export class RosterSelectorComponent extends Container implements Focusable {
 			? fuzzyFilter(items, query, (item) => `${item.fullId} ${item.model.name ?? ""}`)
 			: items;
 
-		const currentEntry = this.selections[this.activeLab.id];
-		const currentIndex = this.filteredModels.findIndex((item) => modelsAreEqual(item.model, currentEntry?.model));
+		const currentIndex = this.filteredModels.findIndex((item) => modelsAreEqual(item.model, this.activeEntry?.model));
 		this.selectedModelIndex =
 			currentIndex >= 0
 				? currentIndex
@@ -176,43 +154,44 @@ export class RosterSelectorComponent extends Container implements Focusable {
 
 	private updateSlots(): void {
 		this.slotContainer.clear();
-		for (let i = 0; i < THINKTANK_LAB_DEFINITIONS.length; i++) {
-			const lab = THINKTANK_LAB_DEFINITIONS[i]!;
-			const entry = this.selections[lab.id];
-			const isActive = i === this.selectedLabIndex;
+		if (this.selections.length === 0) {
+			this.slotContainer.addChild(new Text(this.theme.fg("warning", "  No agents configured. Select a model and press Enter or + to add one."), 0, 0));
+			return;
+		}
+		const maxVisibleAgents = 6;
+		const startIndex = Math.max(
+			0,
+			Math.min(this.selectedAgentIndex - Math.floor(maxVisibleAgents / 2), this.selections.length - maxVisibleAgents),
+		);
+		const endIndex = Math.min(startIndex + maxVisibleAgents, this.selections.length);
+		for (let i = startIndex; i < endIndex; i++) {
+			const entry = this.selections[i]!;
+			const isActive = i === this.selectedAgentIndex;
 			const prefix = isActive ? this.theme.fg("accent", "→ ") : "  ";
-			const labText = isActive ? this.theme.fg("accent", lab.shortName.padEnd(9)) : lab.shortName.padEnd(9);
-			const modelText = entry
-				? entry.disabled
-					? this.theme.fg("muted", `disabled ${entry.model.provider}/${entry.model.id}:${entry.thinkingLevel}`)
-					: `${entry.model.provider}/${entry.model.id}:${entry.thinkingLevel}`
-				: this.theme.fg("warning", `missing ${lab.providerCandidates.join("|")}`);
-			this.slotContainer.addChild(new Text(`${prefix}${labText} ${modelText}`, 0, 0));
+			const agentText = isActive ? this.theme.fg("accent", `Agent ${i + 1}`.padEnd(9)) : `Agent ${i + 1}`.padEnd(9);
+			const modelText = entry.disabled
+				? this.theme.fg("muted", `disabled ${entry.model.provider}/${entry.model.id}:${entry.thinkingLevel}`)
+				: `${entry.model.provider}/${entry.model.id}:${entry.thinkingLevel}`;
+			this.slotContainer.addChild(new Text(`${prefix}${agentText} ${modelText}`, 0, 0));
+		}
+		if (startIndex > 0 || endIndex < this.selections.length) {
+			this.slotContainer.addChild(new Text(this.theme.fg("muted", `  Agent ${this.selectedAgentIndex + 1}/${this.selections.length}`), 0, 0));
 		}
 	}
 
 	private updateList(): void {
 		this.listContainer.clear();
-
 		if (this.filteredModels.length === 0) {
-			this.listContainer.addChild(
-				new Text(this.theme.fg("muted", `  No configured ${this.activeLab.shortName} models`), 0, 0),
-			);
-			this.listContainer.addChild(
-				new Text(this.theme.fg("muted", `  Providers: ${this.activeLab.providerCandidates.join(", ")}`), 0, 0),
-			);
+			this.listContainer.addChild(new Text(this.theme.fg("muted", "  No configured Pi models match the search."), 0, 0));
 			return;
 		}
 
 		const startIndex = Math.max(
 			0,
-			Math.min(
-				this.selectedModelIndex - Math.floor(this.maxVisible / 2),
-				this.filteredModels.length - this.maxVisible,
-			),
+			Math.min(this.selectedModelIndex - Math.floor(this.maxVisible / 2), this.filteredModels.length - this.maxVisible),
 		);
 		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredModels.length);
-		const currentEntry = this.selections[this.activeLab.id];
+		const currentEntry = this.activeEntry;
 
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredModels[i]!;
@@ -224,159 +203,149 @@ export class RosterSelectorComponent extends Container implements Focusable {
 			const effort = isCurrent ? this.theme.fg("muted", `:${currentEntry?.thinkingLevel}`) : "";
 			const disabled = isCurrent && currentEntry?.disabled ? this.theme.fg("muted", " disabled") : "";
 			const checkmark = isCurrent ? this.theme.fg(currentEntry?.disabled ? "muted" : "success", " ✓") : "";
-			this.listContainer.addChild(
-				new Text(`${prefix}${modelText}${providerBadge}${effort}${disabled}${checkmark}`, 0, 0),
-			);
+			this.listContainer.addChild(new Text(`${prefix}${modelText}${providerBadge}${effort}${disabled}${checkmark}`, 0, 0));
 		}
 
 		if (startIndex > 0 || endIndex < this.filteredModels.length) {
-			this.listContainer.addChild(
-				new Text(this.theme.fg("muted", `  (${this.selectedModelIndex + 1}/${this.filteredModels.length})`), 0, 0),
-			);
+			this.listContainer.addChild(new Text(this.theme.fg("muted", `  (${this.selectedModelIndex + 1}/${this.filteredModels.length})`), 0, 0));
 		}
 
 		const selected = this.filteredModels[this.selectedModelIndex];
 		if (selected) {
 			this.listContainer.addChild(new Spacer(1));
-			this.listContainer.addChild(new Text(this.theme.fg("muted", `  Model Name: ${selected.model.name}`), 0, 0));
-			this.listContainer.addChild(
-				new Text(
-					this.theme.fg("muted", `  Effort: ${getThinktankSupportedThinkingLevels(selected.model).join(", ")}`),
-					0,
-					0,
-				),
-			);
+			this.listContainer.addChild(new Text(this.theme.fg("muted", `  Model Name: ${selected.model.name ?? selected.model.id}`), 0, 0));
+			this.listContainer.addChild(new Text(this.theme.fg("muted", `  Effort: ${getThinktankSupportedThinkingLevels(selected.model).join(", ")}`), 0, 0));
 		}
 	}
 
-	private moveLab(delta: number): void {
-		const count = THINKTANK_LAB_DEFINITIONS.length;
-		this.selectedLabIndex = (this.selectedLabIndex + delta + count) % count;
+	private moveAgent(delta: number): void {
+		if (this.selections.length === 0) return;
+		this.selectedAgentIndex = (this.selectedAgentIndex + delta + this.selections.length) % this.selections.length;
 		this.selectedModelIndex = 0;
 		this.refresh();
 	}
 
-	private selectCurrentModel(): void {
-		const item = this.filteredModels[this.selectedModelIndex];
-		if (!item) {
-			return;
-		}
-		const labId: LabId = this.activeLab.id;
-		const previousEntry = this.selections[labId];
-		this.selections = {
-			...this.selections,
-			[labId]: {
-				model: item.model,
-				thinkingLevel: clampThinktankThinkingLevel(item.model, previousEntry?.thinkingLevel),
-				disabled: false,
-			},
-		};
-		void this.callbacks.onChange(cloneSelections(this.selections));
-		this.moveLab(1);
-	}
-
-	private toggleActiveLabEnabled(): void {
-		const labId: LabId = this.activeLab.id;
-		const currentEntry = this.selections[labId];
-		const model = currentEntry?.model ?? this.filteredModels[this.selectedModelIndex]?.model;
-		if (!model) {
-			return;
-		}
-
-		this.selections = {
-			...this.selections,
-			[labId]: {
-				model,
-				thinkingLevel: currentEntry?.thinkingLevel ?? clampThinktankThinkingLevel(model, undefined),
-				disabled: !currentEntry?.disabled,
-			},
-		};
+	private emitChange(): void {
 		void this.callbacks.onChange(cloneSelections(this.selections));
 		this.refresh();
+	}
+
+	private addCurrentModel(): void {
+		const item = this.filteredModels[this.selectedModelIndex];
+		if (!item) return;
+		this.selections = [
+			...this.selections,
+			{
+				id: createThinktankAgentId(this.selections.map((entry) => entry.id)),
+				model: item.model,
+				thinkingLevel: clampThinktankThinkingLevel(item.model, undefined),
+				disabled: false,
+			},
+		];
+		this.selectedAgentIndex = this.selections.length - 1;
+		this.emitChange();
+	}
+
+	private selectCurrentModel(): void {
+		const item = this.filteredModels[this.selectedModelIndex];
+		if (!item) return;
+		const previousEntry = this.activeEntry;
+		if (!previousEntry) {
+			this.addCurrentModel();
+			return;
+		}
+		this.selections = this.selections.map((entry, index) =>
+			index === this.selectedAgentIndex
+				? {
+						...entry,
+						model: item.model,
+						thinkingLevel: clampThinktankThinkingLevel(item.model, previousEntry.thinkingLevel),
+						disabled: false,
+					}
+				: entry,
+		);
+		this.emitChange();
+	}
+
+	private removeActiveAgent(): void {
+		if (!this.activeEntry) return;
+		this.selections = this.selections.filter((_entry, index) => index !== this.selectedAgentIndex);
+		this.selectedAgentIndex = Math.min(this.selectedAgentIndex, Math.max(0, this.selections.length - 1));
+		this.emitChange();
+	}
+
+	private toggleActiveAgentEnabled(): void {
+		if (!this.activeEntry) return;
+		this.selections = this.selections.map((entry, index) =>
+			index === this.selectedAgentIndex ? { ...entry, disabled: !entry.disabled } : entry,
+		);
+		this.emitChange();
 	}
 
 	private cycleActiveThinkingLevel(delta: number): void {
-		const labId: LabId = this.activeLab.id;
-		const currentEntry = this.selections[labId];
-		const model = currentEntry?.model ?? this.filteredModels[this.selectedModelIndex]?.model;
-		if (!model) {
-			return;
-		}
-
-		const levels = getThinktankSupportedThinkingLevels(model);
-		if (levels.length === 0) {
-			return;
-		}
-
-		const currentLevel: ThinkingLevel = currentEntry?.thinkingLevel ?? clampThinktankThinkingLevel(model, undefined);
+		const currentEntry = this.activeEntry;
+		if (!currentEntry) return;
+		const levels = getThinktankSupportedThinkingLevels(currentEntry.model);
+		if (levels.length === 0) return;
+		const currentLevel: ThinkingLevel = currentEntry.thinkingLevel;
 		const currentIndex = Math.max(0, levels.indexOf(currentLevel));
 		const nextLevel = levels[(currentIndex + delta + levels.length) % levels.length]!;
-		this.selections = {
-			...this.selections,
-			[labId]: {
-				model,
-				thinkingLevel: nextLevel,
-				disabled: currentEntry?.disabled,
-			},
-		};
-		void this.callbacks.onChange(cloneSelections(this.selections));
-		this.refresh();
+		this.selections = this.selections.map((entry, index) =>
+			index === this.selectedAgentIndex ? { ...entry, thinkingLevel: nextLevel } : entry,
+		);
+		this.emitChange();
 	}
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
-
 		if (kb.matches(data, "tui.input.tab")) {
-			this.moveLab(1);
+			this.moveAgent(1);
 			return;
 		}
-
 		if (matchesKey(data, Key.shift("tab"))) {
-			this.moveLab(-1);
+			this.moveAgent(-1);
 			return;
 		}
-
 		if (kb.matches(data, "tui.select.up")) {
 			if (this.filteredModels.length === 0) return;
-			this.selectedModelIndex =
-				this.selectedModelIndex === 0 ? this.filteredModels.length - 1 : this.selectedModelIndex - 1;
+			this.selectedModelIndex = this.selectedModelIndex === 0 ? this.filteredModels.length - 1 : this.selectedModelIndex - 1;
 			this.updateList();
 			return;
 		}
-
 		if (kb.matches(data, "tui.select.down")) {
 			if (this.filteredModels.length === 0) return;
-			this.selectedModelIndex =
-				this.selectedModelIndex === this.filteredModels.length - 1 ? 0 : this.selectedModelIndex + 1;
+			this.selectedModelIndex = this.selectedModelIndex === this.filteredModels.length - 1 ? 0 : this.selectedModelIndex + 1;
 			this.updateList();
 			return;
 		}
-
-		if (this.searchInput.getValue() === "" && matchesKey(data, Key.space)) {
-			this.toggleActiveLabEnabled();
+		if (this.searchInput.getValue() === "" && data === "+") {
+			this.addCurrentModel();
 			return;
 		}
-
+		if (this.searchInput.getValue() === "" && matchesKey(data, Key.delete)) {
+			this.removeActiveAgent();
+			return;
+		}
+		if (this.searchInput.getValue() === "" && matchesKey(data, Key.space)) {
+			this.toggleActiveAgentEnabled();
+			return;
+		}
 		if (this.searchInput.getValue() === "" && matchesKey(data, Key.left)) {
 			this.cycleActiveThinkingLevel(-1);
 			return;
 		}
-
 		if (this.searchInput.getValue() === "" && matchesKey(data, Key.right)) {
 			this.cycleActiveThinkingLevel(1);
 			return;
 		}
-
 		if (kb.matches(data, "tui.select.confirm")) {
 			this.selectCurrentModel();
 			return;
 		}
-
 		if (kb.matches(data, "tui.select.cancel")) {
 			this.callbacks.onCancel();
 			return;
 		}
-
 		if (matchesKey(data, Key.ctrl("c"))) {
 			if (this.searchInput.getValue()) {
 				this.searchInput.setValue("");
@@ -386,7 +355,6 @@ export class RosterSelectorComponent extends Container implements Focusable {
 			}
 			return;
 		}
-
 		this.searchInput.handleInput(data);
 		this.refresh();
 	}

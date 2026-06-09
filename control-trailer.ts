@@ -2,7 +2,7 @@
 //
 // Each Lab Agent ends its visible turn with one line of the form:
 //
-//   CONTROL: {"done": false, "yield": false, "next": "anthropic", "bid": 70}
+//   CONTROL: {"done": false, "yield": false, "next": "agent-k3x9", "bid": 70}
 //
 // The runtime strips this line from the visible transcript and records the
 // parsed signal as that agent's "standing trailer", which scheduler.ts reads
@@ -43,21 +43,7 @@ export const ABSENT_TRAILER: SpeakerTrailer = {
 /** Default bid when a trailer is present but omits an explicit bid. */
 const DEFAULT_PRESENT_BID = 50;
 
-export const DEFAULT_TRAILER_AGENT_IDS = ["openai", "google", "anthropic"] as const;
-
-const NEXT_ALIASES: Record<string, string> = {
-	openai: "openai",
-	gpt: "openai",
-	o3: "openai",
-	o4: "openai",
-	codex: "openai",
-	google: "google",
-	gemini: "google",
-	anthropic: "anthropic",
-	claude: "anthropic",
-	opus: "anthropic",
-	sonnet: "anthropic",
-};
+export const DEFAULT_TRAILER_AGENT_IDS: readonly string[] = [];
 
 export function normalizeNextId(raw: unknown, validIds: readonly string[]): string | null {
 	if (typeof raw !== "string") {
@@ -67,14 +53,7 @@ export function normalizeNextId(raw: unknown, validIds: readonly string[]): stri
 	if (lower === "" || lower === "null" || lower === "none" || lower === "any") {
 		return null;
 	}
-	if (validIds.includes(lower)) {
-		return lower;
-	}
-	const alias = NEXT_ALIASES[lower];
-	if (alias && validIds.includes(alias)) {
-		return alias;
-	}
-	return null;
+	return validIds.find((id) => id.toLowerCase() === lower) ?? null;
 }
 
 function clampBid(raw: unknown): number {
@@ -148,12 +127,13 @@ export function parseControlTrailer(
  * appear in `next`.
  */
 export function controlTrailerInstructions(validIds: readonly string[]): string {
-	const idList = validIds.length > 0 ? validIds.join(", ") : DEFAULT_TRAILER_AGENT_IDS.join(", ");
+	const idList = validIds.length > 0 ? validIds.join(", ") : "no active agent ids";
+	const exampleNext = validIds[0] ?? "agent-id";
 	return `After your visible message, end with exactly one line that starts with "CONTROL:" followed by a compact JSON object. This line is removed before other agents see your message and never appears in the room transcript.
 Fields (all optional):
   "bid": integer 0-100 — how strongly you want the floor again next (higher means more eager to continue).
   "next": one of [${idList}] — name the agent who should respond next, if one specifically should.
   "yield": true — you have nothing more to add right now.
   "done": true — you believe the room has reached its answer and can stop.
-Omit a field to leave it at its default. Example: CONTROL: {"bid": 70, "next": "anthropic"}`;
+Omit a field to leave it at its default. Example: CONTROL: {"bid": 70, "next": "${exampleNext}"}`;
 }

@@ -21,12 +21,10 @@ import {
 	DEFAULT_PRECOMPACTION_THRESHOLD_RATIO,
 } from "./precompaction.ts";
 import {
+	type AgentId,
 	getThinktankModelReference,
 	getThinktankVisibleName,
-	type LabId,
-	selectDefaultThinktankRosterModels,
-	THINKTANK_LAB_DEFINITIONS,
-	type ThinktankLabDefinition,
+	selectThinktankRoster,
 	type ThinktankRosterModels,
 } from "./roster.ts";
 import type {
@@ -97,7 +95,7 @@ export {
 } from "./scheduler.ts";
 
 export interface ThinktankRoomAgentInfo {
-	id: LabId;
+	id: AgentId;
 	visibleName: string;
 	lab: string;
 	provider: string;
@@ -179,7 +177,7 @@ interface PublicActionSummary {
 }
 
 interface LabAgentRuntime {
-	definition: ThinktankLabDefinition;
+	id: AgentId;
 	model: ThinktankModelLike;
 	thinkingLevel: ThinkingLevel;
 	visibleName: string;
@@ -192,7 +190,7 @@ interface LabAgentRuntime {
 }
 
 export interface ThinktankLabSessionInfo {
-	id: LabId;
+	id: AgentId;
 	lab: string;
 	active: boolean;
 	visibleName?: string;
@@ -270,13 +268,18 @@ function createRoomSessionDir(cwd: string): string {
 
 function getAgentInfo(agent: LabAgentRuntime): ThinktankRoomAgentInfo {
 	return {
-		id: agent.definition.id,
+		id: agent.id,
 		visibleName: agent.visibleName,
-		lab: agent.definition.shortName,
+		lab: agent.id,
 		provider: agent.model.provider,
 		model: agent.model.id,
 		thinkingLevel: agent.thinkingLevel,
 	};
+}
+
+function getAgentSessionDir(roomSessionDir: string, agentId: AgentId): string {
+	const safeId = agentId.replace(/[^a-zA-Z0-9._-]/g, "-") || "unnamed";
+	return join(roomSessionDir, "labs", `agent-${safeId}`);
 }
 
 function getTextFromMessage(message: ThinktankAgentMessageLike): string {
@@ -356,14 +359,14 @@ export class ThinktankRoomRuntime {
 	private publicActions: PublicActionSummary[] = [];
 	private pendingPublicActions = new Map<string, PublicActionSummary>();
 	private failurePolicyStates = new Map<string, AgentFailurePolicyState>();
-	private standingTrailers = new Map<LabId, SpeakerTrailer>();
+	private standingTrailers = new Map<AgentId, SpeakerTrailer>();
 	private maxRounds: number;
 	private labTools?: readonly string[] | "all";
 	private labMemory: "ephemeral" | "persistent";
 	private roomHalted = false;
 	private currentHumanPrompt = "";
 	private currentHumanImages: ImageContent[] = [];
-	private agentsThatReceivedHumanImages = new Set<LabId>();
+	private agentsThatReceivedHumanImages = new Set<AgentId>();
 	private running = false;
 	private disposed = false;
 	private readyPromise: Promise<void>;
@@ -429,20 +432,17 @@ export class ThinktankRoomRuntime {
 	}
 
 	getLabSessionInfos(): ThinktankLabSessionInfo[] {
-		return THINKTANK_LAB_DEFINITIONS.map((definition) => {
-			const agent = this.agents.find((candidate) => candidate.definition.id === definition.id);
-			return {
-				id: definition.id,
-				lab: definition.shortName,
-				active: agent !== undefined,
-				visibleName: agent?.visibleName,
-				provider: agent?.model.provider,
-				model: agent?.model.id,
-				thinkingLevel: agent?.thinkingLevel,
-				sessionDir: join(this.roomSessionDir, "labs", definition.id),
-				sessionFile: agent?.session.sessionFile,
-			};
-		});
+		return this.agents.map((agent) => ({
+			id: agent.id,
+			lab: agent.visibleName,
+			active: true,
+			visibleName: agent.visibleName,
+			provider: agent.model.provider,
+			model: agent.model.id,
+			thinkingLevel: agent.thinkingLevel,
+			sessionDir: getAgentSessionDir(this.roomSessionDir, agent.id),
+			sessionFile: agent.session.sessionFile,
+		}));
 	}
 
 	async ready(): Promise<void> {
@@ -475,34 +475,36 @@ export class ThinktankRoomRuntime {
 
 		this.services.modelRegistry.refresh();
 		const availableModels = this.services.modelRegistry.getAvailable() as Model<Api>[];
-		const selectedRoster = selectDefaultThinktankRosterModels(
+		const selectedRoster = selectThinktankRoster(
 			availableModels,
-			Object.fromEntries(
-				Object.entries(rosterSelections).map(([labId, entry]) => [
-					labId,
-					entry
-						? {
-								provider: entry.model.provider,
-								model: entry.model.id,
-								thinkingLevel: entry.thinkingLevel,
-								disabled: entry.disabled,
-							}
-						: undefined,
-				]),
-			),
+			rosterSelections.map((entry) => ({
+				id: entry.id,
+				provider: entry.model.provider,
+				model: entry.model.id,
+				thinkingLevel: entry.thinkingLevel,
+				disabled: entry.disabled,
+			})),
 			// Inject the deps clamp so roster.ts doesn't import pi-ai value imports.
-			(model, level) =>
-				this.deps.clampThinkingLevel(model, level ?? "high") as ThinkingLevel,
+			(model, level) => this.deps.clampThinkingLevel(model, level ?? "high") as ThinkingLevel,
 		);
+		const duplicateTotals = new Map<string, number>();
+		for (const entry of selectedRoster.filter((candidate) => !candidate.disabled)) {
+			const baseName = getThinktankVisibleName(entry.model);
+			duplicateTotals.set(baseName, (duplicateTotals.get(baseName) ?? 0) + 1);
+		}
+		const duplicateOccurrences = new Map<string, number>();
 
-		for (const definition of THINKTANK_LAB_DEFINITIONS) {
-			const rosterEntry = selectedRoster[definition.id];
-			if (!rosterEntry || rosterEntry.disabled) {
+		for (const rosterEntry of selectedRoster) {
+			if (rosterEntry.disabled) {
 				continue;
 			}
-			const { model, thinkingLevel } = rosterEntry;
+			const { id, model, thinkingLevel } = rosterEntry;
+			const baseName = getThinktankVisibleName(model);
+			const occurrence = (duplicateOccurrences.get(baseName) ?? 0) + 1;
+			duplicateOccurrences.set(baseName, occurrence);
+			const duplicateNumber = (duplicateTotals.get(baseName) ?? 0) > 1 ? occurrence : undefined;
 
-			const sessionDir = join(this.roomSessionDir, "labs", definition.id);
+			const sessionDir = getAgentSessionDir(this.roomSessionDir, id);
 			mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
 			const created = await this.deps.createLabSession({
 				cwd: this.cwd,
@@ -515,10 +517,10 @@ export class ThinktankRoomRuntime {
 			});
 
 			const labAgent: LabAgentRuntime = {
-				definition,
+				id,
 				model,
 				thinkingLevel,
-				visibleName: getThinktankVisibleName(definition, model),
+				visibleName: getThinktankVisibleName(model, duplicateNumber),
 				session: created.session as ThinktankSessionLike,
 				unsubscribe: () => {},
 			};
@@ -531,7 +533,7 @@ export class ThinktankRoomRuntime {
 	}
 
 	private getPublicActionKey(agent: LabAgentRuntime, toolCallId: string): string {
-		return `${agent.definition.id}:${toolCallId}`;
+		return `${agent.id}:${toolCallId}`;
 	}
 
 	// Translate the room's labTools policy into createLabSession options.
@@ -730,14 +732,14 @@ export class ThinktankRoomRuntime {
 
 	private applyFailurePolicy(agent: LabAgentRuntime, phase: AgentTurnPhase, error: ThinktankAgentTurnError): void {
 		const result = evaluateAgentFailure({
-			agentId: agent.definition.id,
+			agentId: agent.id,
 			category: error.category,
 			nowMs: Date.now(),
-			previous: this.failurePolicyStates.get(agent.definition.id),
+			previous: this.failurePolicyStates.get(agent.id),
 			unsuppressedAgentCountBeforeFailure: this.getUnsuppressedAgentCount(),
 			options: DEFAULT_AGENT_FAILURE_POLICY_OPTIONS,
 		});
-		this.failurePolicyStates.set(agent.definition.id, result.state);
+		this.failurePolicyStates.set(agent.id, result.state);
 
 		if (result.decision === "continue") {
 			return;
@@ -777,7 +779,7 @@ export class ThinktankRoomRuntime {
 	}
 
 	private recordAgentTurnSuccess(agent: LabAgentRuntime): void {
-		this.failurePolicyStates = resetAgentFailurePolicyState(this.failurePolicyStates, agent.definition.id);
+		this.failurePolicyStates = resetAgentFailurePolicyState(this.failurePolicyStates, agent.id);
 	}
 
 	private recordAgentTurnError(
@@ -847,34 +849,17 @@ export class ThinktankRoomRuntime {
 		return getTextFromMessage(message);
 	}
 
-	private getMentionedAgentIds(): LabId[] {
+	private getMentionedAgentIds(): AgentId[] {
 		const promptWords = new Set(this.currentHumanPrompt.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
-		const mentioned: LabId[] = [];
+		const mentioned: AgentId[] = [];
 		for (const agent of this.agents) {
-			const aliases = [
-				agent.definition.id,
-				agent.definition.shortName,
-				agent.definition.displayName,
-				agent.visibleName,
-				agent.model.id,
-				agent.model.name ?? "",
-				...agent.definition.modelIdNeedles,
-			];
-			if (agent.definition.id === "openai") {
-				aliases.push("openai", "gpt");
-			}
-			if (agent.definition.id === "anthropic") {
-				aliases.push("anthropic", "claude", "opus");
-			}
-			if (agent.definition.id === "google") {
-				aliases.push("google", "gemini");
-			}
+			const aliases = [agent.id, agent.visibleName, agent.model.provider, agent.model.id, agent.model.name ?? ""];
 			const named = aliases.some((alias) => {
 				const aliasWords = alias.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 				return aliasWords.length > 0 && aliasWords.every((word) => promptWords.has(word));
 			});
 			if (named) {
-				mentioned.push(agent.definition.id);
+				mentioned.push(agent.id);
 			}
 		}
 		return mentioned;
@@ -895,7 +880,7 @@ export class ThinktankRoomRuntime {
 		const roster = this.agents
 			.map(
 				(candidate) =>
-					`${candidate.definition.shortName}: ${candidate.visibleName} (${getThinktankModelReference(candidate.model as Model<Api>)}:${candidate.thinkingLevel})`,
+					`${candidate.id}: ${candidate.visibleName} (${getThinktankModelReference(candidate.model as Model<Api>)}:${candidate.thinkingLevel})`,
 			)
 			.join("\n");
 		const isFirstTurn = this.transcript.length === 0;
@@ -905,7 +890,7 @@ export class ThinktankRoomRuntime {
 				: phase === "opening"
 					? "Give your first contribution to the room. Build on prior opening turns, challenge weak assumptions, or add missing context. Do not merely restate what has already been said."
 					: "Continue the discussion naturally. Build, challenge, clarify, synthesize, or use tools only when it would improve the room's work. If you believe the room has reached its answer, state it concisely and set done in your control line.";
-		const activeAgentIds = this.activeAgents().map((candidate) => candidate.definition.id);
+		const activeAgentIds = this.activeAgents().map((candidate) => candidate.id);
 
 		let interruptNotice = "";
 		if (this.lastInterruption) {
@@ -913,7 +898,7 @@ export class ThinktankRoomRuntime {
 			this.lastInterruption = undefined;
 		}
 
-		return `You are the ${agent.definition.shortName} Lab Agent in a shared AI Thinktank room.
+		return `You are Lab Agent ${agent.id} in a shared AI Thinktank room.
 Your visible name is ${agent.visibleName}.
 Your model provenance is ${getThinktankModelReference(agent.model as Model<Api>)}.
 
@@ -949,10 +934,10 @@ Write only your visible contribution to the room, then the single CONTROL line. 
 	}
 
 	private getImagesForAgentPrompt(agent: LabAgentRuntime): ImageContent[] | undefined {
-		if (this.currentHumanImages.length === 0 || this.agentsThatReceivedHumanImages.has(agent.definition.id)) {
+		if (this.currentHumanImages.length === 0 || this.agentsThatReceivedHumanImages.has(agent.id)) {
 			return undefined;
 		}
-		this.agentsThatReceivedHumanImages.add(agent.definition.id);
+		this.agentsThatReceivedHumanImages.add(agent.id);
 		return this.currentHumanImages;
 	}
 
@@ -963,7 +948,7 @@ Write only your visible contribution to the room, then the single CONTROL line. 
 		if (this.interruptionLock) {
 			return; // First accepted wins
 		}
-		if (typeof interrupter === "object" && interrupter.definition.id === this.activeTurn.agent.definition.id) {
+		if (typeof interrupter === "object" && interrupter.id === this.activeTurn.agent.id) {
 			return; // No self-interruption
 		}
 
@@ -1057,7 +1042,7 @@ Write only your visible contribution to the room, then the single CONTROL line. 
 		const GLOBAL_COOLDOWN_MS = 30 * 1000;
 		const URGENCY_THRESHOLD = 80;
 
-		const lastPolls = new Map<LabId, number>();
+		const lastPolls = new Map<AgentId, number>();
 
 		while (!signal.aborted) {
 			await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -1076,9 +1061,9 @@ Write only your visible contribution to the room, then the single CONTROL line. 
 				continue;
 			}
 
-			const activeAgentId = this.activeTurn.agent.definition.id;
+			const activeAgentId = this.activeTurn.agent.id;
 			const eligibleAgents = this.activeAgents().filter(
-				(a) => a.definition.id !== activeAgentId && now - (lastPolls.get(a.definition.id) ?? 0) >= POLL_INTERVAL_MS,
+				(a) => a.id !== activeAgentId && now - (lastPolls.get(a.id) ?? 0) >= POLL_INTERVAL_MS,
 			);
 
 			if (eligibleAgents.length === 0) {
@@ -1088,7 +1073,7 @@ Write only your visible contribution to the room, then the single CONTROL line. 
 			// For polling, grab one agent to poll per cycle to avoid flooding
 			const agentToPoll = eligibleAgents[0];
 			if (!agentToPoll) continue;
-			lastPolls.set(agentToPoll.definition.id, now);
+			lastPolls.set(agentToPoll.id, now);
 
 			const currentText = this.activeTurn.partialText;
 			const pollPrompt = `Human prompt:
@@ -1236,7 +1221,7 @@ Decide if you need to interrupt them immediately.`;
 		}
 		if (this.agents.length === 0) {
 			throw new Error(
-				"No enabled OpenAI, Google, or Anthropic lab models found. Use /roster to enable at least one agent, or /login first.",
+				"No enabled Thinktank agents found. Use /thinktank roster to add at least one Pi model, or /login first.",
 			);
 		}
 
@@ -1265,12 +1250,12 @@ Decide if you need to interrupt them immediately.`;
 			const initialActiveCount = Math.max(1, this.getUnsuppressedAgentCount());
 			const maxTurns = Math.min(MAX_ROOM_TURNS, this.maxRounds * initialActiveCount);
 			const mentionedAgentIds = this.getMentionedAgentIds();
-			const spokenAgentIds = new Set<LabId>();
+			const spokenAgentIds = new Set<AgentId>();
 			// Track the agent that actually took the previous turn (recorded or not).
 			// Deriving "last speaker" from the transcript alone is unsafe: an empty or
 			// failed turn is never appended, so a stale nominator could otherwise keep
 			// handing the floor to the same non-responding agent forever.
-			let lastSpeakerId: LabId | undefined;
+			let lastSpeakerId: AgentId | undefined;
 
 			for (let turnIndex = 0; turnIndex < maxTurns; turnIndex++) {
 				if (this.roomHalted) {
@@ -1283,7 +1268,7 @@ Decide if you need to interrupt them immediately.`;
 				}
 
 				const decision = pickNextSpeaker({
-					activeAgentIds: this.activeAgents().map((candidate) => candidate.definition.id),
+					activeAgentIds: this.activeAgents().map((candidate) => candidate.id),
 					lastSpeakerId,
 					spokenAgentIds: [...spokenAgentIds],
 					trailers: this.trailerSnapshot(),
@@ -1300,15 +1285,15 @@ Decide if you need to interrupt them immediately.`;
 					break;
 				}
 
-				const agent = this.agents.find((candidate) => candidate.definition.id === decision.agentId);
+				const agent = this.agents.find((candidate) => candidate.id === decision.agentId);
 				if (!agent) {
 					endReason = "internal";
 					break;
 				}
 				const phase: AgentTurnPhase = decision.reason === "opening" ? "opening" : "discussion";
-				const activeAgentIds = this.activeAgents().map((candidate) => candidate.definition.id);
+				const activeAgentIds = this.activeAgents().map((candidate) => candidate.id);
 
-				spokenAgentIds.add(agent.definition.id);
+				spokenAgentIds.add(agent.id);
 				this.callbacks.onStatus?.(phase === "opening" ? "Opening the room." : "Discussing.");
 				this.callbacks.onAgentTurnStart?.(getAgentInfo(agent));
 
@@ -1369,10 +1354,10 @@ Decide if you need to interrupt them immediately.`;
 				// reset to absent so the agent is not auto-selected (it can still be
 				// nominated by a peer's handoff).
 				this.standingTrailers.set(
-					agent.definition.id,
+					agent.id,
 					!turnErrored && !turnInterrupted ? trailer : { ...ABSENT_TRAILER },
 				);
-				lastSpeakerId = agent.definition.id;
+				lastSpeakerId = agent.id;
 
 				if (!turnErrored) {
 					this.recordAgentTurnSuccess(agent);

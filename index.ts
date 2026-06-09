@@ -27,8 +27,7 @@ import {
 } from "./room-runtime.ts";
 import {
 	getThinktankRosterEntryReference,
-	selectDefaultThinktankRosterModels,
-	THINKTANK_LAB_DEFINITIONS,
+	selectThinktankRoster,
 	type ThinktankAgentRosterSelections,
 	type ThinktankRoster,
 } from "./roster.ts";
@@ -46,7 +45,7 @@ type ThinktankMessageKind = "roster" | "human" | "agent" | "tool" | "status" | "
 
 interface ThinktankSettings {
 	enabled?: boolean;
-	roster?: Record<string, unknown>;
+	roster?: unknown;
 }
 
 interface ThinktankToolMessage {
@@ -127,20 +126,26 @@ function persistThinktankEnabled(enabled: boolean): void {
 }
 
 function readSavedRosterSelections(): ThinktankAgentRosterSelections {
-	const saved = readThinktankSettings().roster ?? {};
-	const selections: ThinktankAgentRosterSelections = {};
+	const saved = readThinktankSettings().roster;
+	const rawEntries: Array<{ id?: unknown; value: unknown }> = Array.isArray(saved)
+		? saved.map((value) => ({ value, id: isObject(value) ? value.id : undefined }))
+		: isObject(saved)
+			? Object.entries(saved).map(([id, value]) => ({ id, value }))
+			: [];
+	const selections: ThinktankAgentRosterSelections = [];
 
-	for (const definition of THINKTANK_LAB_DEFINITIONS) {
-		const entry = saved[definition.id];
-		if (!isObject(entry) || typeof entry.provider !== "string" || typeof entry.model !== "string") {
+	for (const raw of rawEntries) {
+		const entry = raw.value;
+		if (!isObject(entry) || typeof raw.id !== "string" || typeof entry.provider !== "string" || typeof entry.model !== "string") {
 			continue;
 		}
-		selections[definition.id] = {
+		selections.push({
+			id: raw.id,
 			provider: entry.provider,
 			model: entry.model,
 			thinkingLevel: normalizeThinkingLevel(entry.thinkingLevel),
 			disabled: entry.disabled === true,
-		};
+		});
 	}
 
 	return selections;
@@ -148,23 +153,13 @@ function readSavedRosterSelections(): ThinktankAgentRosterSelections {
 
 function persistRosterSelections(roster: ThinktankRoster): void {
 	const settings = readThinktankSettings();
-	const saved: Record<
-		string,
-		{ provider: string; model: string; thinkingLevel?: ThinkingLevel; disabled?: boolean } | undefined
-	> = {};
-
-	for (const definition of THINKTANK_LAB_DEFINITIONS) {
-		const entry = roster[definition.id];
-		saved[definition.id] = entry
-			? {
-					provider: entry.model.provider,
-					model: entry.model.id,
-					thinkingLevel: entry.thinkingLevel,
-					disabled: entry.disabled,
-				}
-			: undefined;
-	}
-
+	const saved = roster.map((entry) => ({
+		id: entry.id,
+		provider: entry.model.provider,
+		model: entry.model.id,
+		thinkingLevel: entry.thinkingLevel,
+		disabled: entry.disabled,
+	}));
 	writeThinktankSettings({ ...settings, roster: saved });
 }
 
@@ -174,22 +169,21 @@ function refreshAvailableModels(ctx: ExtensionContext): Model<Api>[] {
 }
 
 function resolveRoster(ctx: ExtensionContext): ThinktankRoster {
-	return selectDefaultThinktankRosterModels(refreshAvailableModels(ctx), readSavedRosterSelections());
+	return selectThinktankRoster(refreshAvailableModels(ctx), readSavedRosterSelections());
 }
 
 function formatRoster(roster: ThinktankRoster): string {
-	return THINKTANK_LAB_DEFINITIONS.map((definition) => {
-		const entry = roster[definition.id];
-		return entry
-			? `${definition.shortName}: ${entry.disabled ? "disabled " : ""}${getThinktankRosterEntryReference(entry)}`
-			: `${definition.shortName}: missing`;
-	}).join(" | ");
+	if (roster.length === 0) {
+		return "no agents";
+	}
+	return roster
+		.map((entry, index) => `${index + 1}: ${entry.disabled ? "disabled " : ""}${getThinktankRosterEntryReference(entry)}`)
+		.join(" | ");
 }
 
 function formatLabSessionInfo(info: ThinktankLabSessionInfo): string {
-	const status = info.active
-		? `${info.visibleName ?? info.lab} (${info.provider}/${info.model}:${info.thinkingLevel})`
-		: "not active in current roster";
+	const configured = info.provider && info.model ? `${info.provider}/${info.model}:${info.thinkingLevel}` : "not configured";
+	const status = info.active ? `${info.visibleName ?? info.lab} (${configured})` : configured;
 	const sessionFile = info.sessionFile ? `\n  session file: \`${info.sessionFile}\`` : "";
 	return `- **${info.lab}**: ${status}\n  directory: \`${info.sessionDir}\`${sessionFile}`;
 }
@@ -200,11 +194,14 @@ function formatThinktankSessions(ctx: ExtensionContext, activeRoom: ThinktankRoo
 	const transcriptFile = activeRoom?.transcriptFile ?? getThinktankTranscriptPath(ctx.cwd);
 	const labs: ThinktankLabSessionInfo[] =
 		activeRoom?.getLabSessionInfos() ??
-		THINKTANK_LAB_DEFINITIONS.map((definition) => ({
-			id: definition.id,
-			lab: definition.shortName,
+		resolveRoster(ctx).map((entry, index) => ({
+			id: entry.id,
+			lab: `Agent ${index + 1}`,
 			active: false,
-			sessionDir: join(labSessionRoot, definition.id),
+			provider: entry.model.provider,
+			model: entry.model.id,
+			thinkingLevel: entry.thinkingLevel,
+			sessionDir: join(labSessionRoot, `agent-${entry.id.replace(/[^a-zA-Z0-9._-]/g, "-") || "unnamed"}`),
 		}));
 
 	return [
@@ -337,7 +334,7 @@ function formatRoomIdle(summary: RoomIdleSummary): { title: string; text: string
 		case "no_active_agents":
 			return {
 				title: "Room idle — no active agents",
-				text: "No enabled agents are available. Use `/roster` to enable models, or `/login`.",
+				text: "No enabled agents are available. Use `/thinktank roster` to add models, or `/login`.",
 				status: "Thinktank: idle (no agents)",
 			};
 		default:
@@ -963,17 +960,58 @@ export default function (pi: ExtensionAPI) {
 		updateRosterStatus(ctx);
 	}
 
+	async function openRoster(ctx: ExtensionContext): Promise<void> {
+		if (!ctx.hasUI) {
+			ctx.ui.notify("/thinktank roster requires interactive mode", "error");
+			return;
+		}
+
+		const availableModels = refreshAvailableModels(ctx);
+		roster = selectThinktankRoster(availableModels, readSavedRosterSelections());
+		updateRosterStatus(ctx);
+
+		await ctx.ui.custom<void>(
+			(_tui, _theme, _keybindings, done) =>
+				new RosterSelectorComponent(
+					{
+						allModels: availableModels,
+						selections: roster ?? [],
+						theme: _theme,
+					},
+					{
+						onChange: async (nextRoster) => {
+							roster = nextRoster;
+							persistRosterSelections(nextRoster);
+							updateRosterStatus(ctx);
+							try {
+								await applyRosterToRoom(ctx);
+							} catch (error) {
+								ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+							}
+						},
+						onCancel: () => done(undefined),
+					},
+				),
+			{ overlay: true },
+		);
+	}
+
 	pi.registerMessageRenderer<ThinktankRoomMessageDetails>(MESSAGE_TYPE, (message, options, theme) =>
 		renderThinktankMessage(message, options)(theme),
 	);
 
 	pi.registerCommand("thinktank", {
-		description: "Show or toggle Thinktank room routing: /thinktank [on|off|status|sessions|reset-labs]",
+		description: "Configure Thinktank: /thinktank [on|off|status|roster|sessions|reset-labs]",
 		handler: async (args, ctx) => {
 			const value = args.trim().toLowerCase();
 			if (!value || value === "status") {
 				updateRosterStatus(ctx);
 				ctx.ui.notify(`Thinktank is ${thinktankEnabled ? "on" : "off"}`, "info");
+				return;
+			}
+
+			if (value === "roster") {
+				await openRoster(ctx);
 				return;
 			}
 
@@ -995,51 +1033,12 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (value !== "on" && value !== "off") {
-				ctx.ui.notify("Usage: /thinktank [on|off|status|sessions|reset-labs]", "error");
+				ctx.ui.notify("Usage: /thinktank [on|off|status|roster|sessions|reset-labs]", "error");
 				return;
 			}
 
 			setThinktankEnabled(ctx, value === "on");
 			ctx.ui.notify(`Thinktank ${value === "on" ? "enabled" : "disabled"}`, "info");
-		},
-	});
-
-	pi.registerCommand("roster", {
-		description: "Choose the OpenAI, Google, and Anthropic Lab Agents for Thinktank",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("/roster requires interactive mode", "error");
-				return;
-			}
-
-			const availableModels = refreshAvailableModels(ctx);
-			roster = selectDefaultThinktankRosterModels(availableModels, readSavedRosterSelections());
-			updateRosterStatus(ctx);
-
-			await ctx.ui.custom<void>(
-				(_tui, _theme, _keybindings, done) =>
-					new RosterSelectorComponent(
-						{
-							allModels: availableModels,
-							selections: roster ?? {},
-							theme: _theme,
-						},
-						{
-							onChange: async (nextRoster) => {
-								roster = nextRoster;
-								persistRosterSelections(nextRoster);
-								updateRosterStatus(ctx);
-								try {
-									await applyRosterToRoom(ctx);
-								} catch (error) {
-									ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-								}
-							},
-							onCancel: () => done(undefined),
-						},
-					),
-				{ overlay: true },
-			);
 		},
 	});
 

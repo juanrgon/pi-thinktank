@@ -23,12 +23,13 @@ describe("parseControlTrailer", () => {
 
 	test("strips the CONTROL line from visible text", () => {
 		const { visibleText, trailer } = parseControlTrailer(
-			'My contribution to the room.\nCONTROL: {"bid": 70, "next": "anthropic"}',
+			'My contribution to the room.\nCONTROL: {"bid": 70, "next": "agent-b"}',
+			["agent-a", "agent-b"],
 		);
 		assert.equal(visibleText, "My contribution to the room.");
 		assert.equal(trailer.present, true);
 		assert.equal(trailer.bid, 70);
-		assert.equal(trailer.next, "anthropic");
+		assert.equal(trailer.next, "agent-b");
 		assert.equal(trailer.yield, false);
 		assert.equal(trailer.done, false);
 	});
@@ -55,10 +56,8 @@ describe("parseControlTrailer", () => {
 		assert.equal(parseControlTrailer('x\nCONTROL: {"bid": 42.6}').trailer.bid, 43);
 	});
 
-	test("normalizes next aliases (claude -> anthropic, gpt -> openai, gemini -> google)", () => {
-		assert.equal(parseControlTrailer('x\nCONTROL: {"next": "claude"}').trailer.next, "anthropic");
-		assert.equal(parseControlTrailer('x\nCONTROL: {"next": "GPT"}').trailer.next, "openai");
-		assert.equal(parseControlTrailer('x\nCONTROL: {"next": "gemini"}').trailer.next, "google");
+	test("matches dynamic agent ids case-insensitively and returns the canonical id", () => {
+		assert.equal(parseControlTrailer('x\nCONTROL: {"next": "AGENT-B"}', ["agent-a", "agent-b"]).trailer.next, "agent-b");
 	});
 
 	test("rejects next that is not an active agent id", () => {
@@ -119,8 +118,9 @@ describe("controlTrailerInstructions", () => {
 		assert.match(text, /"next"/);
 	});
 
-	test("falls back to default ids when given an empty list", () => {
+	test("describes an empty active roster without assuming provider families", () => {
 		const text = controlTrailerInstructions([]);
-		assert.match(text, /openai, google, anthropic/);
+		assert.match(text, /no active agent ids/);
+		assert.match(text, /agent-id/);
 	});
 });

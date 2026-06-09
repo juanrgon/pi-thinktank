@@ -2,7 +2,7 @@
 // roster.ts stays free of `@earendil-works/pi-ai` value imports.
 //
 // This file is only loaded by:
-//   - roster-selector.ts (the /roster TUI)
+//   - roster-selector.ts (the /thinktank roster TUI)
 //   - lib.ts (public re-exports)
 //   - runtime-default-deps.ts (indirectly, via the runtime that injects
 //     clampThinkingLevel through ThinktankRuntimeDeps)

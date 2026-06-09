@@ -52,7 +52,7 @@ A `labMemory` room option controls the policy:
   only about whether private lab sessions auto-resume.
 - Fresh sessions are still written to disk (inspectable, crash-recoverable); they
   are simply never auto-loaded. New session files accumulate per run under
-  `labs/<lab-id>/`; periodic cleanup can be added later.
+  `labs/agent-<agent-id>/`; periodic cleanup can be added later.
 - Anyone who wants cross-run continuity can opt in with `labMemory: "persistent"`.
 
 ## Cross-session behavior

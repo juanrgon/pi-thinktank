@@ -4,11 +4,11 @@ This glossary defines domain terms for the Thinktank extension. It intentionally
 
 ## Lab Agent
 
-A model-backed participant in a Thinktank room. A Lab Agent has a lab identity, a configured model, and a visible name in the room transcript. A Lab Agent retains a private memory across rooms (its lab session) that persists even when the room itself ends.
+A model-backed participant in a Thinktank room. A Lab Agent has a stable agent identity, a configured Pi model, and a visible name in the room transcript. A roster may contain any number of Lab Agents, including several backed by the same provider/model. A Lab Agent retains private context during its lab session even when the room itself becomes idle.
 
 ## Lab session
 
-The private per-agent context owned by a Lab Agent for a working directory. Lab sessions live on disk under the room-session directory. By default a Lab Agent starts a **fresh** lab session each Pi run (ephemeral memory) and does not auto-resume prior sessions; an opt-in persistent mode resumes the most recent session so memory carries across runs. Resetting or not resuming a lab session is distinct from ending a room.
+The private per-agent context owned by a Lab Agent for a working directory. Lab sessions live on disk under the room-session directory and are keyed by stable agent identity rather than provider/model. By default a Lab Agent starts a **fresh** lab session each Pi run (ephemeral memory) and does not auto-resume prior sessions; an opt-in persistent mode resumes the most recent session so memory carries across runs. Resetting or not resuming a lab session is distinct from ending a room.
 
 ## Thinktank room
 

@@ -293,7 +293,7 @@ These are real issues we identified, but they're either lower-leverage or upstre
 
 - **Full `room-runtime.ts` refactor / file split.** Tempting but risky without the Phase 0 seam. Revisit after Phase 4 once we have real test coverage of the hot paths.
 - **Provider-layer fix for `thinking.type.enabled` on Copilot Claude internal models.** That's a `pi-ai` / `pi-agent-core` issue, not this extension's. Phase 1 makes the symptom visible; the proper fix lives upstream in Pi itself.
-- **Lab roster extensibility** (adding a 4th lab without code changes — currently requires editing `roster.ts:7`, `roster.ts:47`, and the iteration in `room-runtime.ts:389`, plus the `LabId` union). Real issue, lower urgency than trust/visibility.
+- ~~**Lab roster extensibility**~~ **Shipped 2026-06-09:** the roster is now a dynamic ordered list. It starts empty, accepts any Pi-available model, permits repeated instances of the exact same provider/model, and is configured through `/thinktank roster`.
 - **Image re-grounding per turn.** `agentsThatReceivedHumanImages` (line 299) marks images as delivered after the first turn per agent. Real issue but affects only image-heavy rooms.
 - **`recordPublicAction` O(N) tool-call/end correlation.** Harmless at 10 turns, less so at 1000. Optimize after Phase 0 makes the change easy to test.
 - **Synchronous `appendFileSync` on the hot path** for every tool start/end. Same logic — defer until refactor.

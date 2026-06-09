@@ -1,84 +1,94 @@
-// Tests for thinktank roster model eligibility, especially the github-copilot
-// family-needle gate that decides which Copilot models appear under each lab.
-//
-// roster.ts has only type-only Pi imports, so it loads under
-// --experimental-strip-types without resolving Pi peer dependencies.
+// Tests for the dynamic Thinktank roster. roster.ts has only type-only Pi
+// imports, so it loads under --experimental-strip-types without resolving Pi
+// peer dependencies.
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-	getThinktankModelsForLab,
+	getThinktankAvailableModels,
 	getThinktankVisibleName,
-	isThinktankModelEligibleForLab,
-	selectThinktankLabModel,
-	THINKTANK_LAB_DEFINITIONS,
+	selectThinktankRoster,
 } from "../roster.ts";
-
-const anthropic = THINKTANK_LAB_DEFINITIONS.find((d) => d.id === "anthropic")!;
-const openai = THINKTANK_LAB_DEFINITIONS.find((d) => d.id === "openai")!;
-const google = THINKTANK_LAB_DEFINITIONS.find((d) => d.id === "google")!;
 
 // Minimal Model<Api> stand-in; the roster functions only read provider/id/name.
 function model(provider: string, id: string, name?: string): any {
 	return { provider, id, name: name ?? id, contextWindow: 128_000, api: "anthropic-messages" };
 }
 
-describe("thinktank roster eligibility (github-copilot family gate)", () => {
-	test("Copilot Claude Quiche (EAP) is eligible for the Anthropic lab", () => {
-		assert.equal(
-			isThinktankModelEligibleForLab(model("github-copilot", "claude-quiche-eap", "Claude Quiche (EAP)"), anthropic),
-			true,
-		);
+describe("dynamic thinktank roster", () => {
+	test("starts empty even when Pi has available models", () => {
+		const available = [model("openai", "gpt-5.5"), model("ollama", "llama3.1:8b")];
+		assert.deepEqual(selectThinktankRoster(available), []);
 	});
 
-	test("Copilot opus stays eligible for the Anthropic lab", () => {
-		assert.equal(isThinktankModelEligibleForLab(model("github-copilot", "claude-opus-4.7"), anthropic), true);
-	});
-
-	test("Copilot gpt-5.5 is not eligible for the Anthropic lab", () => {
-		assert.equal(isThinktankModelEligibleForLab(model("github-copilot", "gpt-5.5"), anthropic), false);
-	});
-
-	test("Copilot Claude is not eligible for the OpenAI lab", () => {
-		assert.equal(isThinktankModelEligibleForLab(model("github-copilot", "claude-quiche-eap"), openai), false);
-	});
-
-	test("Copilot gemini is eligible for Google but not Anthropic", () => {
-		assert.equal(isThinktankModelEligibleForLab(model("github-copilot", "gemini-3.1-pro-preview"), google), true);
-		assert.equal(isThinktankModelEligibleForLab(model("github-copilot", "gemini-3.1-pro-preview"), anthropic), false);
-	});
-
-	test("native anthropic provider bypasses the family needle gate", () => {
-		assert.equal(isThinktankModelEligibleForLab(model("anthropic", "some-future-claude-codename"), anthropic), true);
-	});
-
-	test("getThinktankModelsForLab keeps only Copilot Claude models for Anthropic", () => {
-		const models = [
-			model("github-copilot", "gpt-5.5"),
-			model("github-copilot", "claude-quiche-eap", "Claude Quiche (EAP)"),
-			model("github-copilot", "claude-opus-4.7"),
-			model("github-copilot", "gemini-3.1-pro-preview"),
+	test("allows any Pi-available model without provider or family gates", () => {
+		const available = [
+			model("ollama", "llama3.1:8b"),
+			model("custom-proxy", "deepseek-v4-pro"),
 		];
-		const ids = getThinktankModelsForLab(models, anthropic)
-			.map((m) => m.id)
-			.sort();
-		assert.deepEqual(ids, ["claude-opus-4.7", "claude-quiche-eap"]);
+		const roster = selectThinktankRoster(available, [
+			{ id: "local", provider: "ollama", model: "llama3.1:8b" },
+			{ id: "deepseek", provider: "custom-proxy", model: "deepseek-v4-pro" },
+		]);
+		assert.deepEqual(roster.map((entry) => `${entry.model.provider}/${entry.model.id}`), [
+			"ollama/llama3.1:8b",
+			"custom-proxy/deepseek-v4-pro",
+		]);
 	});
 
-	test("auto-selection prefers claude-quiche-eap for the Anthropic lab when present", () => {
-		const models = [
-			model("github-copilot", "claude-opus-4.7"),
-			model("github-copilot", "claude-quiche-eap", "Claude Quiche (EAP)"),
-		];
-		assert.equal(selectThinktankLabModel(models, anthropic)?.id, "claude-quiche-eap");
+	test("allows the exact same provider/model more than once", () => {
+		const available = [model("anthropic", "claude-sonnet")];
+		const roster = selectThinktankRoster(available, [
+			{ id: "agent-a", provider: "anthropic", model: "claude-sonnet" },
+			{ id: "agent-b", provider: "anthropic", model: "claude-sonnet" },
+		]);
+		assert.equal(roster.length, 2);
+		assert.deepEqual(roster.map((entry) => entry.id), ["agent-a", "agent-b"]);
+		assert.equal(roster[0]?.model, roster[1]?.model);
 	});
 
-	test("quiche keeps a truthful visible name rather than the Opus display name", () => {
-		const name = getThinktankVisibleName(
-			anthropic,
-			model("github-copilot", "claude-quiche-eap", "Claude Quiche (EAP)"),
+	test("drops duplicate or unsafe agent identities while preserving duplicate models", () => {
+		const available = [model("openai", "gpt")];
+		const roster = selectThinktankRoster(available, [
+			{ id: "same-id", provider: "openai", model: "gpt" },
+			{ id: "same-id", provider: "openai", model: "gpt" },
+			{ id: "../outside", provider: "openai", model: "gpt" },
+		]);
+		assert.equal(roster.length, 1);
+	});
+
+	test("ignores saved selections whose models are no longer available", () => {
+		const roster = selectThinktankRoster([model("openai", "gpt")], [
+			{ id: "missing", provider: "ollama", model: "gone" },
+		]);
+		assert.deepEqual(roster, []);
+	});
+
+	test("preserves order, disabled state, and clamps thinking through the injected helper", () => {
+		const available = [model("custom", "a"), model("custom", "b")];
+		const roster = selectThinktankRoster(
+			available,
+			[
+				{ id: "b", provider: "custom", model: "b", thinkingLevel: "xhigh", disabled: true },
+				{ id: "a", provider: "custom", model: "a", thinkingLevel: "low" },
+			],
+			(_model, level) => (level === "xhigh" ? "high" : (level ?? "off")),
 		);
-		assert.equal(name, "Anthropic (Claude Quiche (EAP))");
+		assert.deepEqual(roster.map((entry) => entry.id), ["b", "a"]);
+		assert.equal(roster[0]?.thinkingLevel, "high");
+		assert.equal(roster[0]?.disabled, true);
+		assert.equal(roster[1]?.thinkingLevel, "low");
+	});
+
+	test("getThinktankAvailableModels returns every model", () => {
+		const available = [model("github-copilot", "gpt"), model("github-copilot", "claude"), model("local", "qwen")];
+		assert.deepEqual(getThinktankAvailableModels(available), available);
+	});
+
+	test("duplicate visible names can be numbered", () => {
+		const duplicate = model("custom", "id", "Same Model");
+		assert.equal(getThinktankVisibleName(duplicate), "Same Model");
+		assert.equal(getThinktankVisibleName(duplicate, 2), "Same Model #2");
 	});
 });

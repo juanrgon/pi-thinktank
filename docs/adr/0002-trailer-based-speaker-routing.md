@@ -49,13 +49,13 @@ signal. The runtime strips this line before other agents see the message and
 records the parsed signal as that agent's *standing trailer*.
 
 ```
-CONTROL: {"done": false, "yield": false, "next": "anthropic", "bid": 70}
+CONTROL: {"done": false, "yield": false, "next": "agent-k3x9", "bid": 70}
 ```
 
 | field   | type                                  | meaning                                              |
 | ------- | ------------------------------------- | ---------------------------------------------------- |
 | `bid`   | int 0–100                             | how strongly the agent wants the floor again next     |
-| `next`  | `openai` \| `google` \| `anthropic` \| null | the agent it thinks should respond next ("over to you") |
+| `next`  | active agent id \| null                  | the agent it thinks should respond next ("over to you") |
 | `yield` | bool                                  | "I have nothing more to add right now"               |
 | `done`  | bool                                  | "I believe the room has reached its answer"          |
 
@@ -71,9 +71,9 @@ urgently) — but sourced from turns already bought, and recorded in the transcr
 - **Present** trailer with missing fields → engaged defaults: `yield:false`,
   `done:false`, `bid:50`. A participating agent that emits `CONTROL: {}` stays in
   the conversation.
-- `next` is normalized through an alias map (`gpt`→`openai`, `gemini`→`google`,
-  `claude`/`opus`→`anthropic`) and validated against the active agent ids; unknown
-  → `null`.
+- `next` is matched case-insensitively and validated against the dynamic active
+  agent ids; unknown ids become `null`. This remains unambiguous even when several
+  participants use the exact same provider/model.
 
 ### Scheduler (`scheduler.ts`, pure)
 

@@ -102,7 +102,7 @@ export function classifyAgentError(
 			summary: truncate(raw || "Model does not support the configured thinking level.", SUMMARY_LIMIT),
 			raw,
 			hint:
-				"This model/provider does not support the configured thinking parameter. Use /roster to lower thinking effort or choose a different model.",
+				"This model/provider does not support the configured thinking parameter. Use /thinktank roster to lower thinking effort or choose a different model.",
 		};
 	}
 

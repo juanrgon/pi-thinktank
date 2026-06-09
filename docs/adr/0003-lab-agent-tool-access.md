@@ -38,7 +38,7 @@ The excluded interactive tools are:
 mouse_right_click, type_text, press_keys, wait, frontmost_app`.
 
 Rationale: those drive the **human participant's physical machine** (mouse,
-keyboard, screen). Letting three autonomous in-room agents wield them is the
+keyboard, screen). Letting autonomous in-room agents wield them is the
 "tool at the wrong time" hazard called out in ADR 0001's threat model, with no
 upside for in-room deliberation. Research/coding tools (`web_search`,
 `code_search`, `fetch_content`, `execute_typescript`, etc.) are included.

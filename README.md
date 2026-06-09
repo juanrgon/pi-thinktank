@@ -18,13 +18,13 @@ After installation, reload Pi:
 /reload
 ```
 
-Use the roster to select the OpenAI, Google, and Anthropic models you want in the room:
+A new installation starts with an empty roster. Use the Thinktank roster to add any models currently available in Pi:
 
 ```text
-/roster
+/thinktank roster
 ```
 
-If the roster shows no available models, run `/login` first to configure your provider credentials.
+The roster can contain any number of agents, including multiple agents using the exact same provider/model. If it shows no available models, run `/login` first to configure your provider credentials.
 
 Turn on the Thinktank:
 
@@ -46,7 +46,7 @@ Note: write safety is still prompt-based — `edit`, `write`, and `bash` are ava
 
 The room transcript is saved to `~/.ai-thinktank/room-sessions/<sanitized-cwd>/transcript.jsonl` and persists across Pi runs.
 
-Each lab agent keeps a **private session** under the same directory (`labs/<lab-id>/`). By default this memory is **ephemeral**: every Pi run starts each lab from a clean session, so agents do **not** silently carry forward conclusions or assumptions from prior prompts. Within a single run the agents share context across turns (the room is one sitting); that context is dropped when the run ends.
+Each lab agent keeps a **private session** under the same directory (`labs/agent-<agent-id>/`). By default this memory is **ephemeral**: every Pi run starts each lab from a clean session, so agents do **not** silently carry forward conclusions or assumptions from prior prompts. Within a single run the agents share context across turns (the room is one sitting); that context is dropped when the run ends.
 
 If you explicitly want agents to resume their most recent prior session for a working directory (carrying memory across runs), construct the room with `labMemory: "persistent"`. This is opt-in because auto-resuming stale private context is a footgun — agents can act on framing you can't see in the current transcript. See [`docs/adr/0004-ephemeral-lab-memory-default.md`](docs/adr/0004-ephemeral-lab-memory-default.md).
 

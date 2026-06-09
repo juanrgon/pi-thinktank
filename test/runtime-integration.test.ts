@@ -22,6 +22,26 @@ import {
 	FakeSession,
 } from "./_fakes/runtime-deps.ts";
 
+function rosterFor(services: FakeServices) {
+	const counts = new Map<string, number>();
+	return services.modelRegistry.getAvailable().map((model, index) => {
+		const family = model.id.includes("gpt")
+			? "openai"
+			: model.id.includes("gemini")
+				? "google"
+				: model.id.includes("claude")
+					? "anthropic"
+					: `agent-${index + 1}`;
+		const occurrence = (counts.get(family) ?? 0) + 1;
+		counts.set(family, occurrence);
+		return {
+			id: occurrence === 1 ? family : `${family}-${occurrence}`,
+			model,
+			thinkingLevel: "high" as const,
+		};
+	});
+}
+
 describe("ThinktankRoomRuntime integration (F4)", () => {
 	test("rebuilds one agent from a fake registry and routes session creation through injected deps", async () => {
 		// Seed the registry with a single model that satisfies the OpenAI lab
@@ -41,7 +61,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			services,
 			deps,
 			cwd: `/tmp/thinktank-f4-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			rosterSelections: {},
+			rosterSelections: rosterFor(services),
 			callbacks: {},
 		});
 
@@ -97,6 +117,31 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 		room.dispose();
 	});
 
+	test("accepts arbitrary Pi models and multiple agents using the exact same model", async () => {
+		const sharedModel = createFakeModel({ provider: "ollama", id: "qwen2.5-coder:7b", name: "Qwen Local" });
+		const services = new FakeServices({ models: [sharedModel] });
+		const deps = new FakeRuntimeDeps();
+		const room = new ThinktankRoomRuntime({
+			services,
+			deps,
+			cwd: `/tmp/thinktank-dynamic-roster-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			rosterSelections: [
+				{ id: "local-a", model: sharedModel, thinkingLevel: "high" },
+				{ id: "local-b", model: sharedModel, thinkingLevel: "high" },
+			],
+			callbacks: {},
+		});
+		await room.ready();
+
+		assert.deepEqual(room.agentInfos.map((agent) => agent.id), ["local-a", "local-b"]);
+		assert.deepEqual(room.agentInfos.map((agent) => agent.visibleName), ["Qwen Local #1", "Qwen Local #2"]);
+		assert.equal(deps.createLabSessionCalls.length, 2);
+		assert.ok(deps.createLabSessionCalls.every((call) => call.model.provider === "ollama"));
+		assert.notEqual(deps.createLabSessionCalls[0]?.sessionDir, deps.createLabSessionCalls[1]?.sessionDir);
+
+		room.dispose();
+	});
+
 	test("agent suppressed after two same-category failures, driven by a peer handoff", async () => {
 		// Two enabled labs so the failing one can be suppressed rather than
 		// triggering the last-agent halt path.
@@ -121,7 +166,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			services,
 			deps,
 			cwd: `/tmp/thinktank-f4-suppress-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			rosterSelections: {},
+			rosterSelections: rosterFor(services),
 			callbacks: {
 				onAgentTurnError: (agent, _phase, error) => {
 					errorEvents.push({ id: agent.id, category: error.category });
@@ -198,7 +243,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			services,
 			deps,
 			cwd: `/tmp/thinktank-f4-trailers-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			rosterSelections: {},
+			rosterSelections: rosterFor(services),
 			callbacks: {
 				onAgentTurnEnd: (agent, text) => endedTurns.push(`${agent.id}:${text}`),
 				onRoomIdle: (summary) => {
@@ -285,7 +330,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			services,
 			deps,
 			cwd: `/tmp/thinktank-f4-interrupt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			rosterSelections: {},
+			rosterSelections: rosterFor(services),
 			callbacks: {
 				onInterrupt: (agent, interrupter, reason) => {
 					interruptions.push({
@@ -392,7 +437,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			services,
 			deps,
 			cwd: `/tmp/thinktank-f4-compaction-retry-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			rosterSelections: {},
+			rosterSelections: rosterFor(services),
 			callbacks: {
 				onAgentTurnEnd: (agent, text) => endedTurns.push(`${agent.id}:${text}`),
 				onAgentTurnError: (agent, _phase, error) => turnErrors.push(`${agent.id}:${error.category}`),
@@ -450,7 +495,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			services,
 			deps,
 			cwd: `/tmp/thinktank-f4-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			rosterSelections: {},
+			rosterSelections: rosterFor(services),
 			callbacks: {
 				onAgentTurnStart: (agent) => events.push(`start:${agent.id}`),
 				onAgentTurnEnd: (agent, text) => events.push(`end:${agent.id}:${text}`),
@@ -519,7 +564,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			services,
 			deps,
 			cwd: `/tmp/thinktank-f4-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			rosterSelections: {},
+			rosterSelections: rosterFor(services),
 			callbacks: {
 				onStatus: (status) => statuses.push(status),
 			},
@@ -574,14 +619,9 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			services,
 			deps,
 			cwd: `/tmp/thinktank-f4-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			rosterSelections: {
-				anthropic: {
-					provider: "anthropic",
-					model: "claude-opus-4.7",
-					thinkingLevel: "high",
-					disabled: true,
-				},
-			},
+			rosterSelections: rosterFor(services).map((entry) =>
+				entry.id === "anthropic" ? { ...entry, disabled: true } : entry,
+			),
 			callbacks: {},
 		});
 		await room.ready();
@@ -607,7 +647,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 				services,
 				deps,
 				cwd: `/tmp/thinktank-labtools-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-				rosterSelections: {},
+				rosterSelections: rosterFor(services),
 				labTools,
 				callbacks: {},
 			});
@@ -639,7 +679,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 				services,
 				deps,
 				cwd: `/tmp/thinktank-labmem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-				rosterSelections: {},
+				rosterSelections: rosterFor(services),
 				labMemory,
 				callbacks: {},
 			});
@@ -672,7 +712,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			services,
 			deps,
 			cwd: `/tmp/thinktank-f4-nonthrow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			rosterSelections: {},
+			rosterSelections: rosterFor(services),
 			callbacks: {
 				onAgentTurnError: (agent, _phase, error) => turnErrors.push(`${agent.id}:${error.category}`),
 			},
@@ -718,7 +758,7 @@ describe("ThinktankRoomRuntime integration (F4)", () => {
 			services,
 			deps,
 			cwd: `/tmp/thinktank-f4-noloop-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			rosterSelections: {},
+			rosterSelections: rosterFor(services),
 			maxRounds: 3,
 			callbacks: {},
 		});
